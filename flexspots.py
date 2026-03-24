@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-FlexSpots for Linux
--------------------
-Connects to a DX Cluster via Telnet, parses incoming spots,
+FlexSpots for Linux v1.2
+------------------------
+Connects to multiple DX Clusters via Telnet, parses incoming spots,
 and pushes them to a FlexRadio SmartSDR radio via the TCP Spots API.
-Spots appear as clickable callsigns on the panadapter.
 
 Requires: PyQt6
     sudo apt install python3-pyqt6
@@ -16,31 +15,24 @@ import threading
 import re
 import time
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QLabel, QPushButton, QLineEdit,
-    QSpinBox, QGroupBox, QStatusBar, QHeaderView, QComboBox,
+    QSpinBox, QGroupBox, QStatusBar, QHeaderView,
     QCheckBox, QSplitter, QTextEdit, QFormLayout, QDialog,
-    QDialogButtonBox, QMessageBox, QTabWidget, QFrame
+    QDialogButtonBox, QTabWidget, QListWidget, QListWidgetItem,
+    QInputDialog
 )
-from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer
-)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QBrush
 
 APP_NAME    = "FlexSpots for Linux"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 FLEX_PORT   = 4992
 SETTINGS_FILE = Path.home() / ".config" / "flexspots" / "settings.json"
-
-SPOT_COLORS = {
-    "DX":      "#00BFFF",
-    "Default": "#FFFFFF",
-}
 
 BAND_RANGES = {
     "160m": (1.800, 2.000),
@@ -58,16 +50,35 @@ BAND_RANGES = {
     "70cm": (420.000, 450.000),
 }
 
+MODE_GROUPS = {
+    "SSB":     ("USB", "LSB", "SSB"),
+    "CW":      ("CW",),
+    "FT8/FT4": ("FT8", "FT4", "DIGU", "DIGI"),
+    "RTTY":    ("RTTY",),
+    "PSK":     ("PSK",),
+    "Other":   ("FM", "AM", "JS8"),
+}
+
+DEFAULT_CLUSTERS = [
+    {"host": "dxc.w3lpl.net",    "port": 7373, "name": "W3LPL"},
+    {"host": "dxc.k3lr.com",     "port": 7373, "name": "K3LR"},
+    {"host": "gb7mbc.sp5bot.net","port": 7373, "name": "GB7MBC"},
+    {"host": "cluster.dl9gtb.de","port": 7373, "name": "DL9GTB"},
+    {"host": "dxc.dx.to",        "port": 7373, "name": "DX.TO"},
+]
+
 class Settings:
     DEFAULTS = {
         "flex_ip":               "",
-        "cluster_host":          "dxc.w3lpl.net",
-        "cluster_port":          7373,
         "callsign":              "",
         "spot_lifetime":         1800,
         "max_spots":             200,
         "auto_connect_flex":     False,
-        "auto_connect_cluster":  False,
+        "auto_connect_clusters": False,
+        "mode_filter":           ["SSB"],
+        "band_filter":           [],
+        "clusters":              DEFAULT_CLUSTERS,
+        "active_clusters":       ["W3LPL"],
     }
 
     def __init__(self):
@@ -130,10 +141,10 @@ class SpotParser:
         for mode in ("FT8","FT4","CW","SSB","RTTY","PSK","JS8","DIGI","FM","AM"):
             if mode in cu:
                 return mode
-        if 14.070 <= freq_mhz <= 14.112:
-            return "FT8"
-        if 7.074 <= freq_mhz <= 7.078:
-            return "FT8"
+        if 14.070 <= freq_mhz <= 14.112: return "FT8"
+        if 7.074  <= freq_mhz <= 7.078:  return "FT8"
+        if 14.000 <= freq_mhz <= 14.070: return "CW"
+        if 7.000  <= freq_mhz <= 7.040:  return "CW"
         return "USB"
 
     @staticmethod
@@ -143,20 +154,24 @@ class SpotParser:
                 return band
         return "OOB"
 
+    @staticmethod
+    def mode_group(mode: str) -> str:
+        for group, modes in MODE_GROUPS.items():
+            if mode in modes:
+                return group
+        return "Other"
+
 
 class FlexThread(QThread):
     connected    = pyqtSignal()
     disconnected = pyqtSignal(str)
     log_message  = pyqtSignal(str)
 
-    def __init__(self, host: str, port: int = FLEX_PORT):
+    def __init__(self, host, port=FLEX_PORT):
         super().__init__()
-        self.host     = host
-        self.port     = port
-        self._sock    = None
-        self._seq     = 1
-        self._running = False
-        self._lock    = threading.Lock()
+        self.host = host; self.port = port
+        self._sock = None; self._seq = 1
+        self._running = False; self._lock = threading.Lock()
 
     def run(self):
         self._running = True
@@ -172,10 +187,8 @@ class FlexThread(QThread):
             self.disconnected.emit(str(e))
         finally:
             if self._sock:
-                try:
-                    self._sock.close()
-                except Exception:
-                    pass
+                try: self._sock.close()
+                except Exception: pass
             self._running = False
 
     def _reader_loop(self):
@@ -183,243 +196,242 @@ class FlexThread(QThread):
         while self._running:
             try:
                 data = self._sock.recv(4096).decode("utf-8", errors="replace")
-                if not data:
-                    break
+                if not data: break
                 buf += data
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     line = line.strip()
-                    if line:
-                        self.log_message.emit(f"[FLEX] {line}")
-            except socket.timeout:
-                continue
+                    if line: self.log_message.emit(f"[FLEX] {line}")
+            except socket.timeout: continue
             except Exception as e:
-                self.disconnected.emit(str(e))
-                return
+                self.disconnected.emit(str(e)); return
         self.disconnected.emit("Connection closed")
 
-    def _send_cmd(self, command: str):
-        seq = self._seq
-        self._seq += 1
+    def _send_cmd(self, command):
+        seq = self._seq; self._seq += 1
         msg = f"C{seq}|{command}\n"
         self.log_message.emit(f"[FLEX->] {msg.strip()}")
         with self._lock:
-            try:
-                self._sock.sendall(msg.encode("utf-8"))
-            except Exception as e:
-                self.log_message.emit(f"[FLEX] Send error: {e}")
+            try: self._sock.sendall(msg.encode("utf-8"))
+            except Exception as e: self.log_message.emit(f"[FLEX] Send error: {e}")
 
-    def send_spot(self, spot: dict, color: str = "#FFFFFF", lifetime: int = 1800):
-        if not self._running or not self._sock:
-            return
-        freq     = f"{spot['freq_mhz']:.6f}"
-        callsign = spot["callsign"]
-        spotter  = spot.get("spotter", "")
-        comment  = spot.get("comment", "")[:64]
-        mode     = spot.get("mode", "USB")
+    def send_spot(self, spot, color="#FFFFFF", lifetime=1800):
+        if not self._running or not self._sock: return
+        freq = f"{spot['freq_mhz']:.6f}"
+        mode = spot.get("mode","USB")
         ssdr_mode = {
-            "CW":"CW","USB":"USB","LSB":"LSB",
+            "CW":"CW","USB":"USB","LSB":"LSB","SSB":"USB",
             "FT8":"DIGU","FT4":"DIGU","RTTY":"RTTY",
-            "PSK":"DIGU","JS8":"DIGU","DIGI":"DIGU",
-            "FM":"FM","AM":"AM",
+            "PSK":"DIGU","JS8":"DIGU","DIGI":"DIGU","FM":"FM","AM":"AM",
         }.get(mode, "USB")
-        cmd = (
-            f"spot add rx_freq={freq} callsign={callsign} "
-            f"mode={ssdr_mode} color={color} "
-            f"source=FlexSpotsLinux spotter_callsign={spotter} "
-            f"lifetime_seconds={lifetime} trigger_action=tune"
-        )
-        if comment:
-            cmd += f" comment={comment!r}"
+        cmd = (f"spot add rx_freq={freq} callsign={spot['callsign']} "
+               f"mode={ssdr_mode} color={color} "
+               f"source=FlexSpotsLinux spotter_callsign={spot.get('spotter','')} "
+               f"lifetime_seconds={lifetime} trigger_action=tune")
+        comment = spot.get("comment","")[:64]
+        if comment: cmd += f" comment={comment!r}"
         self._send_cmd(cmd)
 
     def clear_spots(self):
-        if self._running and self._sock:
-            self._send_cmd("spot clear")
+        if self._running and self._sock: self._send_cmd("spot clear")
 
     def stop(self):
         self._running = False
         if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
+            try: self._sock.close()
+            except Exception: pass
 
 
 class ClusterThread(QThread):
-    connected     = pyqtSignal()
-    disconnected  = pyqtSignal(str)
+    connected     = pyqtSignal(str)
+    disconnected  = pyqtSignal(str, str)
     spot_received = pyqtSignal(dict)
     raw_line      = pyqtSignal(str)
 
-    def __init__(self, host: str, port: int, callsign: str):
+    def __init__(self, name, host, port, callsign):
         super().__init__()
-        self.host     = host
-        self.port     = port
-        self.callsign = callsign
-        self._sock    = None
-        self._running = False
+        self.name = name; self.host = host
+        self.port = port; self.callsign = callsign
+        self._sock = None; self._running = False
 
     def run(self):
         self._running = True
         try:
             self._sock = socket.create_connection((self.host, self.port), timeout=15)
             self._sock.settimeout(60.0)
-            self.raw_line.emit(f"[CLUSTER] Connected to {self.host}:{self.port}")
+            self.raw_line.emit(f"[{self.name}] Connected to {self.host}:{self.port}")
             self._login()
-            self.connected.emit()
+            self.connected.emit(self.name)
             self._reader_loop()
         except Exception as e:
-            self.disconnected.emit(str(e))
+            self.disconnected.emit(self.name, str(e))
         finally:
             if self._sock:
-                try:
-                    self._sock.close()
-                except Exception:
-                    pass
+                try: self._sock.close()
+                except Exception: pass
             self._running = False
 
     def _login(self):
-        buf = ""
-        deadline = time.time() + 20
+        buf = ""; deadline = time.time() + 20
         while time.time() < deadline:
             try:
                 data = self._sock.recv(1024).decode("utf-8", errors="replace")
-                buf += data
-                self.raw_line.emit(data.strip())
+                buf += data; self.raw_line.emit(data.strip())
                 if any(p in buf.lower() for p in ("call","login","enter","please")):
                     time.sleep(0.5)
                     self._sock.sendall((self.callsign + "\r\n").encode())
-                    self.raw_line.emit(f"[CLUSTER->] {self.callsign}")
-                    time.sleep(1)
-                    break
-            except socket.timeout:
-                break
+                    self.raw_line.emit(f"[{self.name}->] {self.callsign}")
+                    time.sleep(1); break
+            except socket.timeout: break
 
     def _reader_loop(self):
         buf = ""
         while self._running:
             try:
                 data = self._sock.recv(4096).decode("utf-8", errors="replace")
-                if not data:
-                    break
+                if not data: break
                 buf += data
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     line = line.strip()
                     if line:
-                        self.raw_line.emit(line)
+                        self.raw_line.emit(f"[{self.name}] {line}")
                         spot = SpotParser.parse(line)
                         if spot:
+                            spot["source"] = self.name
                             self.spot_received.emit(spot)
             except socket.timeout:
-                try:
-                    self._sock.sendall(b"\r\n")
-                except Exception:
-                    break
+                try: self._sock.sendall(b"\r\n")
+                except Exception: break
                 continue
             except Exception as e:
-                self.disconnected.emit(str(e))
-                return
-        self.disconnected.emit("Cluster connection closed")
-
-    def send_command(self, cmd: str):
-        if self._running and self._sock:
-            try:
-                self._sock.sendall((cmd + "\r\n").encode())
-            except Exception:
-                pass
+                self.disconnected.emit(self.name, str(e)); return
+        self.disconnected.emit(self.name, "Connection closed")
 
     def stop(self):
         self._running = False
         if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
+            try: self._sock.close()
+            except Exception: pass
+
+
+class ClusterManagerDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Manage DX Clusters")
+        self.setMinimumSize(500, 400)
+        self._build_ui(); self._load()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        lbl = QLabel("Check clusters to connect to. Use Add to add your own.")
+        lbl.setWordWrap(True); layout.addWidget(lbl)
+        self.list_widget = QListWidget(); layout.addWidget(self.list_widget)
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("Add Cluster"); btn_add.clicked.connect(self._add_cluster)
+        btn_remove = QPushButton("Remove Selected"); btn_remove.clicked.connect(self._remove_cluster)
+        btn_row.addWidget(btn_add); btn_row.addWidget(btn_remove); btn_row.addStretch()
+        layout.addLayout(btn_row)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save_and_accept); bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
+
+    def _load(self):
+        self.list_widget.clear()
+        clusters = self.settings.get("clusters", DEFAULT_CLUSTERS)
+        active   = self.settings.get("active_clusters", [])
+        for c in clusters:
+            item = QListWidgetItem(f"{c['name']}  -  {c['host']}:{c['port']}")
+            item.setData(Qt.ItemDataRole.UserRole, c)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if c["name"] in active else Qt.CheckState.Unchecked)
+            self.list_widget.addItem(item)
+
+    def _add_cluster(self):
+        name, ok = QInputDialog.getText(self, "Add Cluster", "Cluster name:")
+        if not ok or not name.strip(): return
+        host, ok = QInputDialog.getText(self, "Add Cluster", "Hostname:")
+        if not ok or not host.strip(): return
+        port, ok = QInputDialog.getInt(self, "Add Cluster", "Port:", 7373, 1, 65535)
+        if not ok: return
+        clusters = self.settings.get("clusters", list(DEFAULT_CLUSTERS))
+        clusters.append({"name": name.strip(), "host": host.strip(), "port": port})
+        self.settings.set("clusters", clusters); self._load()
+
+    def _remove_cluster(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        c = self.list_widget.item(row).data(Qt.ItemDataRole.UserRole)
+        clusters = [x for x in self.settings.get("clusters", []) if x["name"] != c["name"]]
+        self.settings.set("clusters", clusters); self._load()
+
+    def _save_and_accept(self):
+        active = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                active.append(item.data(Qt.ItemDataRole.UserRole)["name"])
+        self.settings.set("active_clusters", active); self.accept()
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("FlexSpots Settings")
-        self.setMinimumWidth(400)
-        self._build_ui()
-        self._load()
+        self.setMinimumWidth(420)
+        self._build_ui(); self._load()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
-
         radio_tab = QWidget()
         rf = QFormLayout(radio_tab)
-        self.flex_ip = QLineEdit()
-        self.flex_ip.setPlaceholderText("192.168.1.x")
+        self.flex_ip = QLineEdit(); self.flex_ip.setPlaceholderText("192.168.1.x")
         rf.addRow("FlexRadio IP:", self.flex_ip)
+        self.callsign = QLineEdit(); self.callsign.setPlaceholderText("Your callsign")
+        rf.addRow("Callsign:", self.callsign)
         self.spot_lifetime = QSpinBox()
-        self.spot_lifetime.setRange(60, 7200)
-        self.spot_lifetime.setSuffix(" sec")
+        self.spot_lifetime.setRange(60, 7200); self.spot_lifetime.setSuffix(" sec")
         rf.addRow("Spot lifetime:", self.spot_lifetime)
-        self.max_spots = QSpinBox()
-        self.max_spots.setRange(10, 2000)
+        self.max_spots = QSpinBox(); self.max_spots.setRange(10, 2000)
         rf.addRow("Max spots:", self.max_spots)
-        self.auto_flex = QCheckBox("Auto-connect on startup")
+        self.auto_flex = QCheckBox("Auto-connect FlexRadio on startup")
         rf.addRow("", self.auto_flex)
-        tabs.addTab(radio_tab, "Radio")
-
-        cluster_tab = QWidget()
-        cf = QFormLayout(cluster_tab)
-        self.cluster_host = QLineEdit()
-        cf.addRow("Cluster host:", self.cluster_host)
-        self.cluster_port = QSpinBox()
-        self.cluster_port.setRange(1, 65535)
-        cf.addRow("Port:", self.cluster_port)
-        self.callsign = QLineEdit()
-        self.callsign.setPlaceholderText("Your callsign")
-        cf.addRow("Callsign:", self.callsign)
-        self.auto_cluster = QCheckBox("Auto-connect on startup")
-        cf.addRow("", self.auto_cluster)
-        tabs.addTab(cluster_tab, "Cluster")
-
+        self.auto_clusters = QCheckBox("Auto-connect clusters on startup")
+        rf.addRow("", self.auto_clusters)
+        tabs.addTab(radio_tab, "Radio / Callsign")
         layout.addWidget(tabs)
-        bb = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        bb.accepted.connect(self._save_and_accept)
-        bb.rejected.connect(self.reject)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save_and_accept); bb.rejected.connect(self.reject)
         layout.addWidget(bb)
 
     def _load(self):
         self.flex_ip.setText(self.settings.get("flex_ip", ""))
+        self.callsign.setText(self.settings.get("callsign", ""))
         self.spot_lifetime.setValue(self.settings.get("spot_lifetime", 1800))
         self.max_spots.setValue(self.settings.get("max_spots", 200))
         self.auto_flex.setChecked(self.settings.get("auto_connect_flex", False))
-        self.cluster_host.setText(self.settings.get("cluster_host", ""))
-        self.cluster_port.setValue(self.settings.get("cluster_port", 7373))
-        self.callsign.setText(self.settings.get("callsign", ""))
-        self.auto_cluster.setChecked(self.settings.get("auto_connect_cluster", False))
+        self.auto_clusters.setChecked(self.settings.get("auto_connect_clusters", False))
 
     def _save_and_accept(self):
-        self.settings.set("flex_ip",             self.flex_ip.text().strip())
-        self.settings.set("spot_lifetime",       self.spot_lifetime.value())
-        self.settings.set("max_spots",           self.max_spots.value())
-        self.settings.set("auto_connect_flex",   self.auto_flex.isChecked())
-        self.settings.set("cluster_host",        self.cluster_host.text().strip())
-        self.settings.set("cluster_port",        self.cluster_port.value())
-        self.settings.set("callsign",            self.callsign.text().strip().upper())
-        self.settings.set("auto_connect_cluster",self.auto_cluster.isChecked())
+        self.settings.set("flex_ip",               self.flex_ip.text().strip())
+        self.settings.set("callsign",              self.callsign.text().strip().upper())
+        self.settings.set("spot_lifetime",         self.spot_lifetime.value())
+        self.settings.set("max_spots",             self.max_spots.value())
+        self.settings.set("auto_connect_flex",     self.auto_flex.isChecked())
+        self.settings.set("auto_connect_clusters", self.auto_clusters.isChecked())
         self.accept()
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.settings       = Settings()
-        self.flex_thread    = None
-        self.cluster_thread = None
-        self.spots          = []
+        self.settings        = Settings()
+        self.flex_thread     = None
+        self.cluster_threads = {}
+        self.spots           = []
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(900, 600)
@@ -428,8 +440,8 @@ class MainWindow(QMainWindow):
 
         if self.settings.get("auto_connect_flex") and self.settings.get("flex_ip"):
             QTimer.singleShot(500, self._connect_flex)
-        if self.settings.get("auto_connect_cluster") and self.settings.get("cluster_host"):
-            QTimer.singleShot(800, self._connect_cluster)
+        if self.settings.get("auto_connect_clusters") and self.settings.get("callsign"):
+            QTimer.singleShot(800, self._connect_active_clusters)
 
     def _build_ui(self):
         central = QWidget()
@@ -437,13 +449,14 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(6, 6, 6, 6)
 
-        toolbar = QHBoxLayout()
+        # Row 1: connections + actions
+        row1 = QHBoxLayout()
 
         flex_grp = QGroupBox("FlexRadio")
         fl = QHBoxLayout(flex_grp)
         self.flex_ip_edit = QLineEdit(self.settings.get("flex_ip", ""))
         self.flex_ip_edit.setPlaceholderText("Radio IP")
-        self.flex_ip_edit.setMaximumWidth(140)
+        self.flex_ip_edit.setMaximumWidth(130)
         fl.addWidget(self.flex_ip_edit)
         self.btn_flex = QPushButton("Connect")
         self.btn_flex.setCheckable(True)
@@ -452,39 +465,21 @@ class MainWindow(QMainWindow):
         self.flex_status = QLabel("●")
         self.flex_status.setStyleSheet("color: #666; font-size: 18px;")
         fl.addWidget(self.flex_status)
-        toolbar.addWidget(flex_grp)
+        row1.addWidget(flex_grp)
 
-        cluster_grp = QGroupBox("DX Cluster")
+        cluster_grp = QGroupBox("DX Clusters")
         cl = QHBoxLayout(cluster_grp)
-        self.cluster_host_edit = QLineEdit(self.settings.get("cluster_host", ""))
-        self.cluster_host_edit.setPlaceholderText("cluster hostname")
-        self.cluster_host_edit.setMinimumWidth(160)
-        cl.addWidget(self.cluster_host_edit)
-        self.btn_cluster = QPushButton("Connect")
-        self.btn_cluster.setCheckable(True)
-        self.btn_cluster.clicked.connect(self._toggle_cluster)
-        cl.addWidget(self.btn_cluster)
-        self.cluster_status = QLabel("●")
-        self.cluster_status.setStyleSheet("color: #666; font-size: 18px;")
-        cl.addWidget(self.cluster_status)
-        toolbar.addWidget(cluster_grp)
-
-        filter_grp = QGroupBox("Filter")
-        flt = QHBoxLayout(filter_grp)
-        flt.addWidget(QLabel("Band:"))
-        self.band_combo = QComboBox()
-        self.band_combo.addItem("All Bands")
-        for b in BAND_RANGES:
-            self.band_combo.addItem(b)
-        self.band_combo.currentTextChanged.connect(self._apply_filters)
-        flt.addWidget(self.band_combo)
-        flt.addWidget(QLabel("Mode:"))
-        self.mode_combo = QComboBox()
-        for m in ["All Modes","CW","SSB","FT8","FT4","RTTY","DIGI"]:
-            self.mode_combo.addItem(m)
-        self.mode_combo.currentTextChanged.connect(self._apply_filters)
-        flt.addWidget(self.mode_combo)
-        toolbar.addWidget(filter_grp)
+        self.btn_clusters_connect = QPushButton("Connect Active")
+        self.btn_clusters_connect.setCheckable(True)
+        self.btn_clusters_connect.clicked.connect(self._toggle_clusters)
+        cl.addWidget(self.btn_clusters_connect)
+        self.cluster_status_label = QLabel("No clusters connected")
+        self.cluster_status_label.setStyleSheet("color: #666;")
+        cl.addWidget(self.cluster_status_label)
+        btn_manage = QPushButton("Manage Clusters")
+        btn_manage.clicked.connect(self._manage_clusters)
+        cl.addWidget(btn_manage)
+        row1.addWidget(cluster_grp)
 
         act_grp = QGroupBox("Actions")
         al = QHBoxLayout(act_grp)
@@ -494,16 +489,48 @@ class MainWindow(QMainWindow):
         btn_settings = QPushButton("Settings")
         btn_settings.clicked.connect(self._open_settings)
         al.addWidget(btn_settings)
-        toolbar.addWidget(act_grp)
-        toolbar.addStretch()
-        main_layout.addLayout(toolbar)
+        row1.addWidget(act_grp)
+        row1.addStretch()
+        main_layout.addLayout(row1)
 
+        # Row 2: filters
+        row2 = QHBoxLayout()
+
+        mode_grp = QGroupBox("Mode Filter")
+        ml = QHBoxLayout(mode_grp)
+        ml.setSpacing(10)
+        self.mode_checks = {}
+        saved_modes = self.settings.get("mode_filter", ["SSB"])
+        for group_name in MODE_GROUPS:
+            cb = QCheckBox(group_name)
+            cb.setChecked(group_name in saved_modes)
+            cb.stateChanged.connect(self._on_filter_changed)
+            self.mode_checks[group_name] = cb
+            ml.addWidget(cb)
+        row2.addWidget(mode_grp)
+
+        band_grp = QGroupBox("Band Filter")
+        bl = QHBoxLayout(band_grp)
+        bl.setSpacing(8)
+        self.band_checks = {}
+        saved_bands = self.settings.get("band_filter", [])
+        for band in BAND_RANGES:
+            cb = QCheckBox(band)
+            cb.setChecked(band in saved_bands if saved_bands else True)
+            cb.stateChanged.connect(self._on_filter_changed)
+            self.band_checks[band] = cb
+            bl.addWidget(cb)
+        row2.addWidget(band_grp)
+        row2.addStretch()
+        main_layout.addLayout(row2)
+
+        # Spots table + log
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(
-            ["Time","Callsign","Freq (MHz)","Band","Mode","Spotter","Comment"]
+            ["Time","Callsign","Freq (MHz)","Band","Mode","Spotter","Source","Comment"]
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -512,125 +539,115 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setColumnWidth(0, 65)
-        self.table.setColumnWidth(1, 110)
-        self.table.setColumnWidth(2, 100)
-        self.table.setColumnWidth(3, 60)
-        self.table.setColumnWidth(4, 60)
-        self.table.setColumnWidth(5, 110)
-        self.table.doubleClicked.connect(self._on_spot_double_clicked)
+        self.table.setColumnWidth(1, 100)
+        self.table.setColumnWidth(2, 95)
+        self.table.setColumnWidth(3, 55)
+        self.table.setColumnWidth(4, 55)
+        self.table.setColumnWidth(5, 100)
+        self.table.setColumnWidth(6, 70)
         splitter.addWidget(self.table)
 
         self.log_console = QTextEdit()
         self.log_console.setReadOnly(True)
-        self.log_console.setMaximumHeight(160)
+        self.log_console.setMaximumHeight(140)
         self.log_console.setFont(QFont("Monospace", 9))
         splitter.addWidget(self.log_console)
-        splitter.setSizes([420, 160])
+        splitter.setSizes([420, 140])
         main_layout.addWidget(splitter)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready - configure Radio IP and Cluster, then connect.")
+        self.status_bar.showMessage("Ready - connect FlexRadio and clusters to start.")
         self.spot_count_label = QLabel("Spots: 0")
         self.status_bar.addPermanentWidget(self.spot_count_label)
 
     def _apply_dark_theme(self):
         self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
-            }
+            QMainWindow, QWidget { background-color: #1e1e2e; color: #cdd6f4; }
             QGroupBox {
-                border: 1px solid #45475a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding: 4px;
-                font-weight: bold;
-                color: #89b4fa;
+                border: 1px solid #45475a; border-radius: 4px;
+                margin-top: 8px; padding: 4px;
+                font-weight: bold; color: #89b4fa;
             }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
             QPushButton {
-                background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #45475a;
-                border-radius: 4px;
-                padding: 4px 10px;
-                min-width: 70px;
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 4px;
+                padding: 4px 10px; min-width: 70px;
             }
             QPushButton:hover { background-color: #45475a; }
-            QPushButton:checked {
-                background-color: #a6e3a1;
-                color: #1e1e2e;
-                font-weight: bold;
-            }
-            QLineEdit, QSpinBox, QComboBox {
+            QPushButton:checked { background-color: #a6e3a1; color: #1e1e2e; font-weight: bold; }
+            QCheckBox { color: #cdd6f4; spacing: 4px; }
+            QCheckBox::indicator {
+                width: 14px; height: 14px;
+                border: 1px solid #45475a; border-radius: 2px;
                 background-color: #313244;
-                color: #cdd6f4;
-                border: 1px solid #45475a;
-                border-radius: 3px;
-                padding: 3px 6px;
+            }
+            QCheckBox::indicator:checked { background-color: #89b4fa; border-color: #89b4fa; }
+            QLineEdit, QSpinBox {
+                background-color: #313244; color: #cdd6f4;
+                border: 1px solid #45475a; border-radius: 3px; padding: 3px 6px;
             }
             QTableWidget {
-                background-color: #181825;
-                color: #cdd6f4;
-                gridline-color: #313244;
-                border: none;
+                background-color: #181825; color: #cdd6f4;
+                gridline-color: #313244; border: none;
                 alternate-background-color: #1e1e2e;
             }
-            QTableWidget::item:selected {
-                background-color: #89b4fa;
-                color: #1e1e2e;
-            }
+            QTableWidget::item:selected { background-color: #89b4fa; color: #1e1e2e; }
             QHeaderView::section {
-                background-color: #313244;
-                color: #89b4fa;
-                border: 1px solid #45475a;
-                padding: 4px;
-                font-weight: bold;
+                background-color: #313244; color: #89b4fa;
+                border: 1px solid #45475a; padding: 4px; font-weight: bold;
             }
             QTextEdit {
-                background-color: #11111b;
-                color: #a6e3a1;
-                border: 1px solid #313244;
-                font-family: monospace;
+                background-color: #11111b; color: #a6e3a1;
+                border: 1px solid #313244; font-family: monospace;
             }
-            QStatusBar {
-                background-color: #181825;
-                color: #6c7086;
+            QStatusBar { background-color: #181825; color: #6c7086; }
+            QListWidget {
+                background-color: #181825; color: #cdd6f4; border: 1px solid #45475a;
             }
+            QListWidget::item:selected { background-color: #89b4fa; color: #1e1e2e; }
             QTabWidget::pane { border: 1px solid #45475a; }
             QTabBar::tab {
-                background-color: #313244;
-                color: #cdd6f4;
-                padding: 6px 14px;
-                border: 1px solid #45475a;
+                background-color: #313244; color: #cdd6f4;
+                padding: 6px 14px; border: 1px solid #45475a;
             }
-            QTabBar::tab:selected {
-                background-color: #89b4fa;
-                color: #1e1e2e;
-            }
-            QDialog {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
-            }
+            QTabBar::tab:selected { background-color: #89b4fa; color: #1e1e2e; }
+            QDialog { background-color: #1e1e2e; color: #cdd6f4; }
         """)
 
-    def _toggle_flex(self, checked: bool):
-        if checked:
-            self._connect_flex()
+    def _get_active_modes(self):
+        active = {n for n, cb in self.mode_checks.items() if cb.isChecked()}
+        return active if active else set(MODE_GROUPS.keys())
+
+    def _get_active_bands(self):
+        active = {n for n, cb in self.band_checks.items() if cb.isChecked()}
+        return active if active else set(BAND_RANGES.keys())
+
+    def _spot_passes_filter(self, spot):
+        return (SpotParser.mode_group(spot.get("mode","USB")) in self._get_active_modes() and
+                spot.get("band","OOB") in self._get_active_bands())
+
+    def _on_filter_changed(self):
+        self.settings.set("mode_filter", [n for n,cb in self.mode_checks.items() if cb.isChecked()])
+        self.settings.set("band_filter",  [n for n,cb in self.band_checks.items()  if cb.isChecked()])
+        am = self._get_active_modes(); ab = self._get_active_bands()
+        for row in range(self.table.rowCount()):
+            bi = self.table.item(row,3); mi = self.table.item(row,4)
+            band = bi.text() if bi else ""; mode = mi.text() if mi else ""
+            self.table.setRowHidden(row,
+                SpotParser.mode_group(mode) not in am or band not in ab)
+
+    def _toggle_flex(self, checked):
+        if checked: self._connect_flex()
         else:
-            self._disconnect_flex()
+            if self.flex_thread: self.flex_thread.stop()
 
     def _connect_flex(self):
         ip = self.flex_ip_edit.text().strip()
         if not ip:
             self._log("Enter FlexRadio IP address first.")
-            self.btn_flex.setChecked(False)
-            return
+            self.btn_flex.setChecked(False); return
         self.settings.set("flex_ip", ip)
         self._log(f"Connecting to FlexRadio at {ip}:{FLEX_PORT}...")
         self.flex_thread = FlexThread(ip, FLEX_PORT)
@@ -639,161 +656,144 @@ class MainWindow(QMainWindow):
         self.flex_thread.log_message.connect(self._log)
         self.flex_thread.start()
 
-    def _disconnect_flex(self):
-        if self.flex_thread:
-            self.flex_thread.stop()
-
     def _on_flex_connected(self):
         self.flex_status.setStyleSheet("color: #a6e3a1; font-size: 18px;")
-        self.btn_flex.setChecked(True)
-        self.status_bar.showMessage("FlexRadio connected.")
-        self._log("FlexRadio connected.")
+        self.btn_flex.setChecked(True); self._log("FlexRadio connected.")
 
-    def _on_flex_disconnected(self, reason: str):
+    def _on_flex_disconnected(self, reason):
         self.flex_status.setStyleSheet("color: #f38ba8; font-size: 18px;")
-        self.btn_flex.setChecked(False)
-        self._log(f"FlexRadio disconnected: {reason}")
+        self.btn_flex.setChecked(False); self._log(f"FlexRadio disconnected: {reason}")
 
-    def _toggle_cluster(self, checked: bool):
-        if checked:
-            self._connect_cluster()
-        else:
-            self._disconnect_cluster()
+    def _toggle_clusters(self, checked):
+        if checked: self._connect_active_clusters()
+        else: self._disconnect_all_clusters()
 
-    def _connect_cluster(self):
-        host     = self.cluster_host_edit.text().strip()
-        callsign = self.settings.get("callsign", "")
-        port     = self.settings.get("cluster_port", 7373)
-        if not host:
-            self._log("Enter cluster hostname first.")
-            self.btn_cluster.setChecked(False)
-            return
+    def _connect_active_clusters(self):
+        callsign = self.settings.get("callsign","")
         if not callsign:
             self._log("Set your callsign in Settings first.")
-            self.btn_cluster.setChecked(False)
-            self._open_settings()
-            return
-        self.settings.set("cluster_host", host)
-        self._log(f"Connecting to cluster {host}:{port} as {callsign}...")
-        self.cluster_thread = ClusterThread(host, port, callsign)
-        self.cluster_thread.connected.connect(self._on_cluster_connected)
-        self.cluster_thread.disconnected.connect(self._on_cluster_disconnected)
-        self.cluster_thread.spot_received.connect(self._on_spot_received)
-        self.cluster_thread.raw_line.connect(self._log)
-        self.cluster_thread.start()
+            self.btn_clusters_connect.setChecked(False)
+            self._open_settings(); return
+        active_names    = self.settings.get("active_clusters", [])
+        clusters        = self.settings.get("clusters", DEFAULT_CLUSTERS)
+        active_clusters = [c for c in clusters if c["name"] in active_names]
+        if not active_clusters:
+            self._log("No clusters selected. Use Manage Clusters.")
+            self.btn_clusters_connect.setChecked(False); return
+        for c in active_clusters:
+            if c["name"] not in self.cluster_threads:
+                self._start_cluster(c, callsign)
+        self.btn_clusters_connect.setChecked(True)
 
-    def _disconnect_cluster(self):
-        if self.cluster_thread:
-            self.cluster_thread.stop()
+    def _start_cluster(self, c, callsign):
+        t = ClusterThread(c["name"], c["host"], c["port"], callsign)
+        t.connected.connect(self._on_cluster_connected)
+        t.disconnected.connect(self._on_cluster_disconnected)
+        t.spot_received.connect(self._on_spot_received)
+        t.raw_line.connect(self._log)
+        t.start()
+        self.cluster_threads[c["name"]] = t
+        self._log(f"Connecting to {c['name']} ({c['host']}:{c['port']})...")
 
-    def _on_cluster_connected(self):
-        self.cluster_status.setStyleSheet("color: #a6e3a1; font-size: 18px;")
-        self.btn_cluster.setChecked(True)
-        self._log("DX Cluster connected.")
+    def _disconnect_all_clusters(self):
+        for t in self.cluster_threads.values(): t.stop()
+        self.cluster_threads.clear()
+        self.btn_clusters_connect.setChecked(False)
+        self.cluster_status_label.setText("No clusters connected")
+        self.cluster_status_label.setStyleSheet("color: #666;")
 
-    def _on_cluster_disconnected(self, reason: str):
-        self.cluster_status.setStyleSheet("color: #f38ba8; font-size: 18px;")
-        self.btn_cluster.setChecked(False)
-        self._log(f"Cluster disconnected: {reason}")
+    def _on_cluster_connected(self, name):
+        self._log(f"{name}: Connected.")
+        self._update_cluster_status()
 
-    def _on_spot_received(self, spot: dict):
-        sel_band = self.band_combo.currentText()
-        sel_mode = self.mode_combo.currentText()
-        if sel_band != "All Bands" and spot.get("band") != sel_band:
-            return
-        if sel_mode != "All Modes" and spot.get("mode") != sel_mode:
-            return
+    def _on_cluster_disconnected(self, name, reason):
+        self._log(f"{name}: Disconnected - {reason}")
+        if name in self.cluster_threads: del self.cluster_threads[name]
+        self._update_cluster_status()
+        if self.btn_clusters_connect.isChecked():
+            self._log(f"{name}: Auto-reconnecting in 30 seconds...")
+            callsign = self.settings.get("callsign","")
+            clusters = self.settings.get("clusters", DEFAULT_CLUSTERS)
+            c = next((x for x in clusters if x["name"] == name), None)
+            if c and callsign:
+                QTimer.singleShot(30000, lambda: self._start_cluster(c, callsign))
+
+    def _update_cluster_status(self):
+        count = len(self.cluster_threads)
+        if count == 0:
+            self.cluster_status_label.setText("No clusters connected")
+            self.cluster_status_label.setStyleSheet("color: #666;")
+        elif count == 1:
+            name = list(self.cluster_threads.keys())[0]
+            self.cluster_status_label.setText(f"● {name}")
+            self.cluster_status_label.setStyleSheet("color: #a6e3a1;")
+        else:
+            self.cluster_status_label.setText(f"● {count} connected")
+            self.cluster_status_label.setStyleSheet("color: #a6e3a1;")
+
+    def _manage_clusters(self):
+        ClusterManagerDialog(self.settings, self).exec()
+
+    def _on_spot_received(self, spot):
+        if not self._spot_passes_filter(spot): return
         max_spots = self.settings.get("max_spots", 200)
-        if len(self.spots) >= max_spots:
-            self.spots.pop(0)
+        if len(self.spots) >= max_spots: self.spots.pop(0)
         self.spots.append(spot)
         self._add_table_row(spot)
         self._push_to_flex(spot)
         self.spot_count_label.setText(f"Spots: {len(self.spots)}")
 
-    def _add_table_row(self, spot: dict):
-        row = 0
-        self.table.insertRow(row)
+    def _add_table_row(self, spot):
+        self.table.insertRow(0)
         items = [
-            spot.get("time", ""),
-            spot.get("callsign", ""),
-            f"{spot['freq_mhz']:.3f}",
-            spot.get("band", ""),
-            spot.get("mode", ""),
-            spot.get("spotter", ""),
-            spot.get("comment", ""),
+            spot.get("time",""), spot.get("callsign",""),
+            f"{spot['freq_mhz']:.3f}", spot.get("band",""),
+            spot.get("mode",""), spot.get("spotter",""),
+            spot.get("source",""), spot.get("comment",""),
         ]
         color = self._spot_color(spot)
         for col, text in enumerate(items):
             item = QTableWidgetItem(text)
             item.setForeground(QBrush(QColor(color)))
             if col == 1:
-                f = item.font()
-                f.setBold(True)
-                item.setFont(f)
-            self.table.setItem(row, col, item)
+                f = item.font(); f.setBold(True); item.setFont(f)
+            self.table.setItem(0, col, item)
         while self.table.rowCount() > self.settings.get("max_spots", 200):
             self.table.removeRow(self.table.rowCount() - 1)
 
-    def _spot_color(self, spot: dict) -> str:
-        mode = spot.get("mode", "")
-        if mode == "CW":
-            return "#FAD05B"
-        if mode in ("FT8","FT4","RTTY","DIGI","PSK"):
-            return "#89dceb"
+    def _spot_color(self, spot):
+        mode = spot.get("mode","")
+        if mode == "CW": return "#FAD05B"
+        if mode in ("FT8","FT4","RTTY","DIGI","PSK"): return "#89dceb"
         return "#00BFFF"
 
-    def _push_to_flex(self, spot: dict):
+    def _push_to_flex(self, spot):
         if self.flex_thread and self.flex_thread.isRunning():
-            color = self._spot_color(spot)
-            life  = self.settings.get("spot_lifetime", 1800)
-            self.flex_thread.send_spot(spot, color=color, lifetime=life)
-
-    def _on_spot_double_clicked(self, index):
-        row = index.row()
-        callsign_item = self.table.item(row, 1)
-        freq_item     = self.table.item(row, 2)
-        if callsign_item and freq_item:
-            self._log(f"Tuning to {callsign_item.text()} @ {freq_item.text()} MHz")
+            self.flex_thread.send_spot(spot,
+                color=self._spot_color(spot),
+                lifetime=self.settings.get("spot_lifetime", 1800))
 
     def _clear_spots(self):
-        self.spots.clear()
-        self.table.setRowCount(0)
+        self.spots.clear(); self.table.setRowCount(0)
         self.spot_count_label.setText("Spots: 0")
         if self.flex_thread and self.flex_thread.isRunning():
             self.flex_thread.clear_spots()
         self._log("Spots cleared.")
 
-    def _apply_filters(self):
-        sel_band = self.band_combo.currentText()
-        sel_mode = self.mode_combo.currentText()
-        for row in range(self.table.rowCount()):
-            band_item = self.table.item(row, 3)
-            mode_item = self.table.item(row, 4)
-            hide = False
-            if sel_band != "All Bands" and band_item and band_item.text() != sel_band:
-                hide = True
-            if sel_mode != "All Modes" and mode_item and mode_item.text() != sel_mode:
-                hide = True
-            self.table.setRowHidden(row, hide)
-
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
-            self.flex_ip_edit.setText(self.settings.get("flex_ip", ""))
-            self.cluster_host_edit.setText(self.settings.get("cluster_host", ""))
+            self.flex_ip_edit.setText(self.settings.get("flex_ip",""))
 
-    def _log(self, msg: str):
+    def _log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_console.append(f"[{ts}] {msg}")
-        sb = self.log_console.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.log_console.verticalScrollBar().setValue(
+            self.log_console.verticalScrollBar().maximum())
 
     def closeEvent(self, event):
-        if self.flex_thread:
-            self.flex_thread.stop()
-        if self.cluster_thread:
-            self.cluster_thread.stop()
+        if self.flex_thread: self.flex_thread.stop()
+        self._disconnect_all_clusters()
         super().closeEvent(event)
 
 
@@ -801,11 +801,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
-    window = MainWindow()
-    window.show()
+    w = MainWindow()
+    w.show()
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     main()
-EOF
