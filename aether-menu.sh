@@ -28,7 +28,7 @@ CHOICES=$(zenity --list --checklist \
 # ─── Helper: ensure SSH tunnel is running ─────────────────────────────────────
 start_tunnel() {
   if ! nc -z 127.0.0.1 4992 2>/dev/null; then
-    ssh -f -L 4992:${FLEX_IP}:4992 pi@${PI_IP} -N 2>/dev/null
+    ssh -f -i ~/.ssh/ham_radio -L 4992:${FLEX_IP}:4992 pi@${PI_IP} -N -o StrictHostKeyChecking=no
     sleep 2
     zenity --info --text="SSH tunnel started to Flex radio" --timeout=2 2>/dev/null &
   fi
@@ -40,9 +40,10 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
 
   # Start FlexSpots
+  sleep 8
   if ! pgrep -f flexspots.py > /dev/null; then
     nohup python3 "$FLEXSPOTS" >/dev/null 2>&1 &
-    sleep 2
+    sleep 4
   fi
 
   # Start bridge

@@ -2,9 +2,9 @@
 import socket,threading,time,re,subprocess,sqlite3
 import urllib.request,xml.etree.ElementTree as ET,json,os
 from datetime import datetime,timezone
-from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QFormLayout,QFrame)
+from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QFormLayout,QFrame,QSystemTrayIcon,QMenu,QInputDialog)
 from PyQt6.QtCore import Qt,QTimer,pyqtSignal,QObject
-from PyQt6.QtGui import QCursor
+from PyQt6.QtGui import QCursor,QIcon,QPixmap,QColor,QPainter
 import sys
 def load_config():
     config={}
@@ -244,6 +244,7 @@ class QSODialog(QDialog):
     def get_values(self): return self.rst_sent.text() or "59",self.rst_rcvd.text() or "59",self.notes.text()
 class SpotSignal(QObject):
     spot_clicked=pyqtSignal(str,float,str,dict)
+    multi_spot=pyqtSignal(list,float,str)
 spot_signal=SpotSignal()
 class SpotPickerDialog(QDialog):
     def __init__(self,spots,freq_mhz,parent=None):
@@ -328,16 +329,20 @@ def lookup_and_emit(callsign,freq_mhz,mode):
     spot_signal.spot_clicked.emit(callsign,freq_mhz,mode,qrz_data)
 
 def pick_and_emit(spots,freq_mhz,mode):
-    """Show picker if multiple spots, then do QRZ lookup and emit"""
+    """Emit signal to show picker on main thread"""
     if len(spots)==1:
         callsign=spots[0][1]['callsign']
-        lookup_and_emit(callsign,freq_mhz,mode)
+        threading.Thread(target=lookup_and_emit,args=(callsign,freq_mhz,mode),daemon=True).start()
         return
+    spot_signal.multi_spot.emit(spots,freq_mhz,mode)
+
+def show_spot_picker(spots,freq_mhz,mode):
+    """Called on main thread - show picker dialog"""
     picker=SpotPickerDialog(spots,freq_mhz)
     if picker.exec()==QDialog.DialogCode.Accepted and picker.selected:
         sf,info=picker.selected
         callsign=info['callsign']
-        lookup_and_emit(callsign,sf,mode)
+        threading.Thread(target=lookup_and_emit,args=(callsign,sf,mode),daemon=True).start()
     else:
         print("  Spot selection cancelled")
 def monitor_flex():
@@ -396,11 +401,51 @@ if __name__=="__main__":
     subprocess.run(["pkill","rigctld"],capture_output=True);time.sleep(1)
     app=QApplication(sys.argv);app.setQuitOnLastWindowClosed(False)
     spot_signal.spot_clicked.connect(show_qso_dialog)
+    spot_signal.multi_spot.connect(show_spot_picker)
     threading.Thread(target=qrz_get_session,daemon=True).start()
     threading.Thread(target=get_solar_data,daemon=True).start()
     threading.Thread(target=start_rigctld_server,daemon=True).start()
     threading.Thread(target=monitor_flex,daemon=True).start()
     print("Ready! Click a spot in AetherSDR to log a QSO.\n")
+
+    # ─── System Tray Icon ─────────────────────────────────────────────────────
+    def create_tray_icon():
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor("#a6e3a1"))
+        painter = QPainter(pixmap)
+        font = painter.font()
+        font.setPointSize(22)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#1e1e2e"))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "73")
+        painter.end()
+        return QIcon(pixmap)
+
+    def show_manual_qso():
+        callsign, ok = QInputDialog.getText(None, "Manual QSO", "Enter callsign:")
+        if ok and callsign.strip():
+            callsign = callsign.strip().upper()
+            with freq_lock:
+                freq_mhz = current_freq / 1e6
+                mode = MODE_MAP.get(current_mode, current_mode)
+            threading.Thread(target=lookup_and_emit, args=(callsign, freq_mhz, mode), daemon=True).start()
+
+    tray = QSystemTrayIcon(create_tray_icon(), app)
+    tray_menu = QMenu()
+    manual_action = tray_menu.addAction("📝 Log Manual QSO")
+    manual_action.triggered.connect(show_manual_qso)
+    tray_menu.addSeparator()
+    status_action = tray_menu.addAction("📡 Flex to Log4OM Bridge - Running")
+    status_action.setEnabled(False)
+    tray_menu.addSeparator()
+    quit_action = tray_menu.addAction("❌ Quit")
+    quit_action.triggered.connect(app.quit)
+    tray.setContextMenu(tray_menu)
+    tray.setToolTip("Flex to Log4OM Bridge - Running")
+    tray.activated.connect(lambda reason: show_manual_qso() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+    tray.show()
+    print("System tray icon active - right-click for options")
 
     def recolor_worked_spots():
         """On startup, recolor spots worked in last 24 hours"""
