@@ -44,7 +44,7 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
   if ! pgrep -f flexspots.py > /dev/null; then
     nohup python3 "$FLEXSPOTS" >/dev/null 2>&1 &
     sleep 4
-    wmctrl -r 'FlexSpots for Linux' -b add,hidden 2>/dev/null || true
+    sleep 2 && xdotool search --name 'FlexSpots for Linux' windowminimize 2>/dev/null || true
   fi
 
   # Start bridge
