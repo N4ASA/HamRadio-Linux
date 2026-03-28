@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Ham Radio
+Comment=Launch CQRLOG and QRZ Uploader
+Exec=/home/dparker100/launch-hamradio.sh
+Icon=applications-hamradio
+Terminal=false
+Type=Application
+Categories=HamRadio;
