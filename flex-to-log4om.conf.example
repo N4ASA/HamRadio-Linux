@@ -1,0 +1,36 @@
+# ─── Flex to Log4OM Bridge - Configuration File ───────────────────────────────
+# Copy this file to ~/.flex-to-log4om.conf and edit with your details
+# Lines starting with # are comments and are ignored
+
+# ─── YOUR STATION INFO ────────────────────────────────────────────────────────
+MY_CALLSIGN = W1ABC
+MY_GRID = FN42
+MY_LAT = 43.5
+MY_LON = -71.5
+MY_CITY = Portland
+MY_COUNTRY = United States
+
+# ─── QRZ.COM CREDENTIALS (Premium membership required for XML API) ────────────
+QRZ_USERNAME = w1abc
+QRZ_PASSWORD = your_qrz_password
+
+# ─── LOG4OM DATABASE ──────────────────────────────────────────────────────────
+# Path to your Log4OM SQLite database (synced via Google Drive)
+DB_LOCAL = ~/YourLog4OMDatabase.SQLite
+
+# ─── GOOGLE DRIVE ─────────────────────────────────────────────────────────────
+# The rclone remote name and folder path where your Log4OM database lives
+GDRIVE_REMOTE = Google_Drive:Log4OM/
+
+# ─── FLEX RADIO ───────────────────────────────────────────────────────────────
+# Local IP of your Flex radio on its network (in Maine, shack, etc.)
+FLEX_IP = 192.168.1.29
+
+# ─── RASPBERRY PI (Tailscale IP) ──────────────────────────────────────────────
+# Tailscale IP of the Pi that is on the same network as your Flex
+PI_IP = 100.76.124.28
+
+# ─── WORKED SPOT COLOR ────────────────────────────────────────────────────────
+# Color to change spots to after logging (HTML hex color)
+# #00FF7F = bright green, #FFD700 = gold, #FF6600 = orange
+WORKED_COLOR = #00FF7F

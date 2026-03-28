@@ -1,0 +1,32 @@
+# Ham Radio Linux Tools
+
+A collection of Linux-native tools for FlexRadio operators.
+Built and tested on Linux Mint 22 / Ubuntu 24.04 with a FLEX-8600.
+
+## What's Included
+
+| Tool | Description |
+|------|-------------|
+| `flexspots.py` | DX Cluster spot client — connects to any DX cluster and pushes spots to your FlexRadio panadapter |
+| `cqrlog_qrz.py` | CQRLOG to QRZ Uploader — automatically uploads every QSO logged in CQRLOG to QRZ.com within seconds |
+| `launch-hamradio.sh` | Launcher script — opens CQRLOG and the QRZ Uploader in the correct order |
+| `Ham-Radio.desktop` | Desktop icon for the launcher |
+
+---
+
+## Requirements
+
+### Hardware
+- FlexRadio FLEX-6000 or FLEX-8000 series transceiver
+- Linux PC running Linux Mint, Ubuntu 24.04, or similar Debian-based distro
+- Optional: Raspberry Pi at the radio site for running FlexSpots
+
+### Accounts Needed
+- QRZ.com Premium/XML subscription (for QRZ uploader)
+- HamQTH.com account - free at hamqth.com (for CQRLOG callsign lookup)
+
+---
+
+## Installation
+
+### Step 1 - Install System Dependencies
