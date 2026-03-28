@@ -1,0 +1,856 @@
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+import subprocess
+import serial
+import time
+import os
+
+app = Flask(__name__)
+
+# ----------- LOAD ENV FILE -----------
+def load_env():
+    env_path = os.path.expanduser("~/ham-web-control/.env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if "=" in line:
+                    key, val = line.strip().split("=", 1)
+                    os.environ[key] = val
+
+load_env()
+
+USERNAME = os.getenv("HAM_USERNAME", "dparker100")
+PASSWORD = os.getenv("HAM_PASSWORD", "changeme")
+app.secret_key = os.getenv("HAM_SECRET_KEY", "fallback-secret")
+
+ROT_PORT = "/dev/serial/by-id/usb-FTDI_FT230X_Basic_UART_D3078XXG-if00-port0"
+ROT_BAUD = 9600
+
+SPE_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AI040U5P-if00-port0"
+SPE_BAUD = 9600
+
+# ----------- AUTH -----------
+def is_logged_in():
+    return session.get("logged_in", False)
+
+def require_login():
+    if not is_logged_in():
+        return redirect(url_for("login"))
+    return None
+
+
+# ----------- HARDWARE STATUS -----------
+def get_rotator_position():
+    try:
+        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
+        time.sleep(0.25)
+        ser.write(b"C2\r\n")
+        time.sleep(0.25)
+        response = ser.read(20).decode(errors="ignore")
+        ser.close()
+        if "+" in response:
+            idx = response.index("+")
+            az = response[idx + 1:idx + 5].strip()
+            return az if az else "---"
+    except Exception:
+        return "ERR"
+    return "---"
+
+
+def get_spe_status():
+    try:
+        ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
+        time.sleep(0.25)
+        ser.write(bytes([0x55, 0x55, 0x55, 0x01, 0x90, 0x90]))
+        time.sleep(0.35)
+        data = ser.read(200)
+        ser.close()
+
+        text = data.decode("ascii", errors="ignore")
+        idx = text.find("C,")
+        if idx == -1:
+            raise ValueError("No valid data found")
+        text = text[idx:]
+        parts = [p.strip() for p in text.strip().split(",")]
+
+        operate = "OPERATE" if parts[2] == "O" else "STANDBY"
+        tx = "TX" if parts[3] == "T" else "RX"
+
+        band_map = {
+            "0": "160m", "1": "80m", "2": "60m", "3": "40m",
+            "4": "30m", "5": "20m", "6": "17m", "7": "15m",
+            "8": "12m", "9": "10m", "10": "6m", "11": "4m"
+        }
+        band = band_map.get(parts[5], parts[5] + "m")
+
+        power_map = {"L": "LOW", "M": "MID", "H": "HIGH"}
+        power = power_map.get(parts[9], parts[9])
+
+        swr = parts[11].strip() if len(parts) > 11 else "---"
+
+        try:
+            temp = str(int(float(parts[15].strip()))) if len(parts) > 15 else "---"
+        except Exception:
+            temp = "---"
+
+        warnings = parts[18].strip() if len(parts) > 18 else "N"
+        alarms = parts[19].strip() if len(parts) > 19 else "N"
+
+        return {
+            "operate": operate,
+            "tx": tx,
+            "band": band,
+            "power": power,
+            "swr": swr,
+            "temp": temp,
+            "warnings": warnings,
+            "alarms": alarms
+        }
+    except Exception:
+        pass
+
+    return {
+        "operate": "---",
+        "tx": "---",
+        "band": "---",
+        "power": "---",
+        "swr": "---",
+        "temp": "---",
+        "warnings": "---",
+        "alarms": "---"
+    }
+
+def vh_status():
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "virtualhere"],
+            capture_output=True, text=True
+        )
+        return "WINDOWS CONTROL" if result.stdout.strip() == "active" else "LINUX CONTROL"
+    except Exception:
+        return "UNKNOWN"
+
+def swr_class(value):
+
+    try:
+        return "alert" if float(value) > 2.0 else "ok"
+    except Exception:
+        return "neutral"
+
+def temp_class(value):
+    try:
+        return "alert" if float(value) > 160 else "ok"
+    except Exception:
+        return "neutral"
+
+def get_status_payload():
+    az = get_rotator_position()
+    spe = get_spe_status()
+    vh = vh_status()
+    try:
+        az_num = float(az)
+    except Exception:
+        az_num = 0
+    return {
+        "az": az,
+        "needle_deg": az_num,
+        "spe": spe,
+        "vh": vh,
+        "swr_color": swr_class(spe["swr"]),
+        "temp_color": temp_class(spe["temp"])
+    }
+
+
+# ----------- HTML: LOGIN -----------
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ham Radio Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 12px;
+        }
+        .login-box {
+            background: #313244;
+            border: 1px solid #45475a;
+            border-radius: 12px;
+            padding: 24px;
+            width: 100%;
+            max-width: 340px;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #89b4fa;
+            text-align: center;
+            margin-top: 0;
+            font-size: 24px;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 8px;
+            border: 1px solid #45475a;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: #89b4fa;
+            color: #1e1e2e;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .msg {
+            text-align: center;
+            color: #f38ba8;
+            min-height: 20px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>Ham Radio Login</h1>
+        <form method="post" action="/login">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Sign In</button>
+        </form>
+        <div class="msg">{{ msg }}</div>
+    </div>
+</body>
+</html>
+"""
+
+
+# ----------- HTML: MAIN -----------
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ham Radio Remote Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 10px;
+            max-width: 1000px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        h1 {
+            text-align: center;
+            color: #89b4fa;
+            margin-bottom: 14px;
+            font-size: 26px;
+        }
+        .topbar {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 10px;
+        }
+        .logout-btn {
+            background: #f38ba8;
+            color: #1e1e2e;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .status-card {
+            background: #313244;
+            border: 1px solid #45475a;
+            border-radius: 10px;
+            padding: 10px;
+            text-align: center;
+        }
+        .status-label {
+            font-size: 12px;
+            color: #a6adc8;
+            margin-bottom: 6px;
+        }
+        .status-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #f5e0dc;
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 14px;
+            margin-bottom: 14px;
+            align-items: start;
+        }
+        .panel {
+            background: #313244;
+            border: 1px solid #45475a;
+            border-radius: 12px;
+            padding: 14px;
+        }
+        .panel h2 {
+            margin-top: 0;
+            color: #a6e3a1;
+            text-align: center;
+            font-size: 20px;
+        }
+        .button-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 12px;
+        }
+        button {
+            width: 100%;
+            padding: 11px;
+            font-size: 14px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .blue { background: #89b4fa; color: #1e1e2e; }
+        .blue:hover { background: #74c7ec; }
+        .red { background: #f38ba8; color: #1e1e2e; }
+        .red:hover { background: #eba0ac; }
+        .orange { background: #fab387; color: #1e1e2e; }
+        .orange:hover { background: #f9c58d; }
+        .green { background: #a6e3a1; color: #1e1e2e; }
+        .green:hover { background: #94e2d5; }
+        input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            font-size: 14px;
+            text-align: center;
+            border-radius: 8px;
+            border: 1px solid #45475a;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            box-sizing: border-box;
+        }
+        select {
+            padding: 6px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .footer-panel {
+            background: #313244;
+            border: 1px solid #45475a;
+            border-radius: 12px;
+            padding: 14px;
+        }
+        .footer-panel h2 {
+            margin-top: 0;
+            color: #89b4fa;
+            text-align: center;
+            font-size: 20px;
+        }
+        .msg {
+            margin-top: 14px;
+            text-align: center;
+            color: #a6e3a1;
+            font-weight: bold;
+            min-height: 20px;
+            font-size: 14px;
+        }
+        .compass-wrap {
+            display: flex;
+            justify-content: center;
+            margin: 10px 0 14px 0;
+        }
+        .compass {
+            width: 190px;
+            height: 190px;
+            border: 2px solid #45475a;
+            border-radius: 50%;
+            position: relative;
+            background: #1e1e2e;
+            cursor: pointer;
+            user-select: none;
+        }
+        .compass-center {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #a6e3a1;
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        .needle {
+            position: absolute;
+            width: 4px;
+            height: 72px;
+            background: #a6e3a1;
+            left: 50%;
+            top: 22px;
+            transform-origin: 50% 73px;
+            border-radius: 4px;
+            transition: transform 0.35s ease-out;
+        }
+        .card-small-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+        .ok { color: #a6e3a1 !important; }
+        .alert { color: #f38ba8 !important; }
+        .neutral { color: #f5e0dc !important; }
+        .dir {
+            position: absolute;
+            font-weight: bold;
+            color: #89b4fa;
+            font-size: 14px;
+        }
+        .dir-n { top: 6px; left: 50%; transform: translateX(-50%); }
+        .dir-e { right: 10px; top: 50%; transform: translateY(-50%); }
+        .dir-s { bottom: 6px; left: 50%; transform: translateX(-50%); }
+        .dir-w { left: 10px; top: 50%; transform: translateY(-50%); }
+        @media (max-width: 700px) {
+            .status-bar,
+            .main-grid,
+            .button-grid,
+            .card-small-grid {
+                grid-template-columns: 1fr;
+            }
+            body {
+                max-width: 100%;
+                padding: 8px;
+            }
+            h1 {
+                font-size: 22px;
+            }
+            .compass {
+                width: 150px;
+                height: 150px;
+            }
+            .needle {
+                height: 56px;
+                top: 18px;
+                transform-origin: 50% 57px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <form method="post" action="/logout">
+            <button class="logout-btn" type="submit">Log Out</button>
+        </form>
+    </div>
+
+    <h1>Ham Radio Remote Control</h1>
+
+    <div class="status-bar">
+        <div class="status-card">
+            <div class="status-label">Rotor Position</div>
+            <div class="status-value" id="az-value">{{ az }}°</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Amp Band</div>
+            <div class="status-value" id="band-value">{{ spe.band }}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Amp Output</div>
+            <div class="status-value" id="power-value">{{ spe.power }}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">VirtualHere</div>
+            <div class="status-value" id="vh-value">{{ vh }}</div>
+        </div>
+    </div>
+
+    <div class="main-grid">
+        <div class="panel">
+            <h2>Rotator Control</h2>
+
+            <div class="compass-wrap">
+                <div class="compass" onclick="rotateFromClick(event)">
+                    <div class="dir dir-n">N</div>
+                    <div class="dir dir-e">E</div>
+                    <div class="dir dir-s">S</div>
+                    <div class="dir dir-w">W</div>
+                    <div class="needle" id="needle"></div>
+                    <div class="compass-center"></div>
+                </div>
+            </div>
+
+            <div style="text-align:center; margin-top:10px;">
+                <label>Step Size:</label>
+                <select id="step-size">
+                    <option value="1">1°</option>
+                    <option value="2">2°</option>
+                    <option value="5" selected>5°</option>
+                    <option value="10">10°</option>
+                </select>
+            </div>
+
+            <div class="button-grid" style="margin-top:12px;">
+                <button type="button" class="green" onclick="nudge(-1)">⬅️ Left</button>
+                <button type="button" class="green" onclick="nudge(1)">Right ➡️</button>
+            </div>
+
+            <div style="margin-top:12px;">
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <input id="manual-azimuth" type="number" min="0" max="360" placeholder="Heading">
+                    <button type="button" class="blue" onclick="manualRotate()">Rotate</button>
+                </div>
+            </div>
+
+            <div style="margin-top:12px;">
+                <button type="button" class="red" onclick="stopRotor()">STOP</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>SPE Amplifier</h2>
+
+            <div class="card-small-grid">
+                <div class="status-card">
+                    <div class="status-label">Mode</div>
+                    <div class="status-value" id="operate-value">{{ spe.operate }}</div>
+                </div>
+                <div class="status-card">
+                    <div class="status-label">TX / RX</div>
+                    <div class="status-value" id="tx-value">{{ spe.tx }}</div>
+                </div>
+                <div class="status-card">
+                    <div class="status-label">SWR</div>
+                    <div class="status-value {{ swr_color }}" id="swr-value">{{ spe.swr }}</div>
+                </div>
+                <div class="status-card">
+                    <div class="status-label">Temp</div>
+                    <div class="status-value {{ temp_color }}" id="temp-value">{{ spe.temp }} F</div>
+                </div>
+            </div>
+
+            <div class="status-card" style="margin-bottom: 14px;">
+                <div class="status-label">Warnings / Alarms</div>
+                <div class="status-value {% if spe.warnings != 'N' or spe.alarms != 'N' %}alert{% else %}ok{% endif %}" id="warn-value">
+                    W: {{ spe.warnings }} &nbsp; A: {{ spe.alarms }}
+                </div>
+            </div>
+
+            <div class="button-grid">
+                <button type="button" class="orange" onclick="sendSimpleCommand('/operate')">Operate / Standby</button>
+                <button type="button" class="orange" onclick="sendSimpleCommand('/tune')">Tune</button>
+                <button type="button" class="orange" onclick="sendSimpleCommand('/power')">Power Level</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer-panel">
+        <h2>VirtualHere Control</h2>
+        <div class="button-grid">
+            <button type="button" class="blue" onclick="sendSimpleCommand('/linux')">Use Linux Control</button>
+            <button type="button" class="blue" onclick="sendSimpleCommand('/windows')">Use Windows Control</button>
+        </div>
+        <div class="msg" id="msg">{{ msg }}</div>
+    </div>
+
+<script>
+let currentAz = {{ needle_deg|tojson }};
+let pollInFlight = false;
+
+function normalizeAngle(angle) {
+    angle = angle % 360;
+    if (angle < 0) angle += 360;
+    return angle;
+}
+
+function setNeedle(angle) {
+    currentAz = normalizeAngle(angle);
+    const needle = document.getElementById("needle");
+    if (needle) {
+        needle.style.transform = "translateX(-50%) rotate(" + currentAz + "deg)";
+    }
+}
+
+function getStep() {
+    return parseInt(document.getElementById("step-size").value);
+}
+
+function nudge(direction) {
+    const step = getStep();
+    let newAz = currentAz + (direction * step);
+    if (newAz < 0) newAz += 360;
+    if (newAz >= 360) newAz -= 360;
+    sendRotate(Math.round(newAz));
+}
+
+function manualRotate() {
+    const val = document.getElementById("manual-azimuth").value;
+    if (val !== "") {
+        sendRotate(val);
+    }
+}
+
+function stopRotor() {
+    fetch("/stop", { method: "POST" }).then(() => {
+        showMessage("Rotator stopped");
+        pollStatus();
+    });
+}
+
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
+function setClass(id, className) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.classList.remove("ok", "alert", "neutral");
+        el.classList.add(className);
+    }
+}
+
+function showMessage(msg) {
+    const el = document.getElementById("msg");
+    if (el) el.textContent = msg;
+}
+
+function rotateFromClick(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+
+    const dx = event.clientX - cx;
+    const dy = cy - event.clientY;
+
+    let angle = Math.atan2(dx, dy) * (180 / Math.PI);
+    if (angle < 0) angle += 360;
+
+    sendRotate(Math.round(angle));
+}
+
+function sendRotate(angle) {
+    currentAz = normalizeAngle(parseFloat(angle));
+    setNeedle(currentAz);
+    showMessage("Rotating to " + angle + "°");
+
+    fetch("/rotate", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "azimuth=" + encodeURIComponent(angle)
+    }).then(() => {
+        pollStatus();
+    });
+}
+
+function sendSimpleCommand(path) {
+    fetch(path, { method: "POST" }).then(() => {
+        pollStatus();
+    });
+}
+
+function pollStatus() {
+    if (pollInFlight) return;
+    pollInFlight = true;
+
+    fetch("/status")
+        .then(response => {
+            if (!response.ok) throw new Error("status fetch failed");
+            return response.json();
+        })
+        .then(data => {
+            setText("az-value", data.az + "°");
+            setText("band-value", data.spe.band);
+            setText("power-value", data.spe.power);
+            setText("vh-value", data.vh);
+
+            setText("operate-value", data.spe.operate);
+            setText("tx-value", data.spe.tx);
+            setText("swr-value", data.spe.swr);
+            setText("temp-value", data.spe.temp + " F");
+            setText("warn-value", "W: " + data.spe.warnings + "   A: " + data.spe.alarms);
+
+            setClass("swr-value", data.swr_color);
+            setClass("temp-value", data.temp_color);
+            setClass("warn-value", (data.spe.warnings !== "N" || data.spe.alarms !== "N") ? "alert" : "ok");
+
+            const azNum = parseFloat(data.az);
+            if (!isNaN(azNum)) setNeedle(azNum);
+        })
+        .catch(() => {
+        })
+        .finally(() => {
+            pollInFlight = false;
+        });
+}
+
+setNeedle(currentAz);
+setInterval(pollStatus, 2500);
+</script>
+</body>
+</html>
+"""
+
+
+
+def rotate_to(azimuth):
+    try:
+        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
+        time.sleep(0.25)
+        cmd = "M" + str(int(float(azimuth))).zfill(3) + "\r\n"
+        ser.write(cmd.encode())
+        time.sleep(0.25)
+        ser.close()
+    except Exception as e:
+        print(f"rotate_to error: {e}")
+
+def stop_rotator():
+    try:
+        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
+        time.sleep(0.25)
+        ser.write(b"S\r\n")
+        time.sleep(0.25)
+        ser.close()
+    except Exception as e:
+        print(f"stop_rotator error: {e}")
+
+def spe_send(cmd):
+    try:
+        ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
+        time.sleep(0.25)
+        ser.write(cmd)
+        time.sleep(0.25)
+        ser.close()
+    except Exception as e:
+        print(f"spe_send error: {e}")
+
+# ----------- RENDER -----------
+def render_page(msg=""):
+    data = get_status_payload()
+    return render_template_string(
+        HTML,
+        az=data["az"],
+        spe=data["spe"],
+        vh=data["vh"],
+        msg=msg,
+        needle_deg=data["needle_deg"],
+        swr_color=data["swr_color"],
+        temp_color=data["temp_color"]
+    )
+
+
+# ----------- ROUTES -----------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if request.form.get("username") == USERNAME and request.form.get("password") == PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("home"))
+        return render_template_string(LOGIN_HTML, msg="Invalid username or password")
+    return render_template_string(LOGIN_HTML, msg="")
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+@app.route("/")
+def home():
+    auth = require_login()
+    if auth:
+        return auth
+    return render_page("")
+
+@app.route("/status")
+def status():
+    auth = require_login()
+    if auth:
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify(get_status_payload())
+
+@app.route("/rotate", methods=["POST"])
+def rotate():
+    auth = require_login()
+    if auth:
+        return auth
+    az = request.form["azimuth"]
+    rotate_to(az)
+    return ("", 204)
+
+@app.route("/stop", methods=["POST"])
+def stop():
+    auth = require_login()
+    if auth:
+        return auth
+    stop_rotator()
+    return ("", 204)
+
+@app.route("/operate", methods=["POST"])
+def operate():
+    auth = require_login()
+    if auth:
+        return auth
+    spe_send(bytes([0x55, 0x55, 0x55, 0x01, 0x0D, 0x0D]))
+    return ("", 204)
+
+@app.route("/tune", methods=["POST"])
+def tune():
+    auth = require_login()
+    if auth:
+        return auth
+    spe_send(bytes([0x55, 0x55, 0x55, 0x01, 0x09, 0x09]))
+    return ("", 204)
+
+@app.route("/power", methods=["POST"])
+def power():
+    auth = require_login()
+    if auth:
+        return auth
+    spe_send(bytes([0x55, 0x55, 0x55, 0x01, 0x0B, 0x0B]))
+    return ("", 204)
+
+@app.route("/linux", methods=["POST"])
+def linux():
+    auth = require_login()
+    if auth:
+        return auth
+    subprocess.run(["sudo", "systemctl", "stop", "virtualhere"])
+    import time as _time
+    _time.sleep(1)
+    subprocess.run(["sudo", "modprobe", "-r", "ftdi_sio"])
+    _time.sleep(2)
+    subprocess.run(["sudo", "modprobe", "ftdi_sio"])
+    return ("", 204)
+
+@app.route("/windows", methods=["POST"])
+def windows():
+    auth = require_login()
+    if auth:
+        return auth
+    subprocess.run(["sudo", "systemctl", "start", "virtualhere"])
+    return ("", 204)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
