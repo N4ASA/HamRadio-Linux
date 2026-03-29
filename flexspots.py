@@ -227,7 +227,7 @@ class FlexThread(QThread):
         cmd = (f"spot add rx_freq={freq} callsign={spot['callsign']} "
                f"mode={ssdr_mode} color={color} "
                f"source=FlexSpotsLinux spotter_callsign={spot.get('spotter','')} "
-               f"lifetime_seconds={lifetime} trigger_action=tune")
+               f"lifetime_seconds={lifetime}")
         comment = spot.get("comment","")[:64]
         if comment: cmd += f" comment={comment!r}"
         self._send_cmd(cmd)
