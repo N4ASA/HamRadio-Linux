@@ -38,6 +38,23 @@ def require_login():
     return None
 
 
+# ----------- HARDWARE AVAILABILITY -----------
+def check_port_available(port, baud):
+    """Try to open a serial port; return True if successful."""
+    try:
+        ser = serial.Serial(port, baud, timeout=1)
+        ser.close()
+        return True
+    except Exception:
+        return False
+
+def get_hardware_availability():
+    return {
+        "rotator": check_port_available(ROT_PORT, ROT_BAUD),
+        "amp": check_port_available(SPE_PORT, SPE_BAUD)
+    }
+
+
 # ----------- HARDWARE STATUS -----------
 def get_rotator_position():
     try:
@@ -130,7 +147,6 @@ def vh_status():
         return "UNKNOWN"
 
 def swr_class(value):
-
     try:
         return "alert" if float(value) > 2.0 else "ok"
     except Exception:
@@ -146,6 +162,7 @@ def get_status_payload():
     az = get_rotator_position()
     spe = get_spe_status()
     vh = vh_status()
+    hw = get_hardware_availability()
     try:
         az_num = float(az)
     except Exception:
@@ -156,7 +173,8 @@ def get_status_payload():
         "spe": spe,
         "vh": vh,
         "swr_color": swr_class(spe["swr"]),
-        "temp_color": temp_class(spe["temp"])
+        "temp_color": temp_class(spe["temp"]),
+        "hw": hw
     }
 
 
@@ -276,6 +294,43 @@ HTML = """
             font-weight: bold;
             cursor: pointer;
         }
+
+        /* ---- Hardware indicator bar ---- */
+        .hw-indicator-bar {
+            display: flex;
+            gap: 18px;
+            justify-content: center;
+            margin-bottom: 14px;
+        }
+        .hw-indicator {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            background: #313244;
+            border: 1px solid #45475a;
+            border-radius: 20px;
+            padding: 5px 14px 5px 10px;
+            font-size: 13px;
+            font-weight: bold;
+            color: #a6adc8;
+        }
+        .hw-dot {
+            width: 11px;
+            height: 11px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            transition: background 0.4s ease, box-shadow 0.4s ease;
+            background: #45475a;
+        }
+        .hw-dot.connected {
+            background: #a6e3a1;
+            box-shadow: 0 0 6px 2px rgba(166, 227, 161, 0.55);
+        }
+        .hw-dot.disconnected {
+            background: #f38ba8;
+            box-shadow: 0 0 6px 2px rgba(243, 139, 168, 0.45);
+        }
+
         .status-bar {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -455,6 +510,9 @@ HTML = """
                 top: 18px;
                 transform-origin: 50% 57px;
             }
+            .hw-indicator-bar {
+                flex-wrap: wrap;
+            }
         }
     </style>
 </head>
@@ -466,6 +524,18 @@ HTML = """
     </div>
 
     <h1>Ham Radio Remote Control</h1>
+
+    <!-- Hardware connection indicators -->
+    <div class="hw-indicator-bar">
+        <div class="hw-indicator">
+            <div class="hw-dot" id="dot-rotator"></div>
+            Rotator
+        </div>
+        <div class="hw-indicator">
+            <div class="hw-dot" id="dot-amp"></div>
+            SPE Amp
+        </div>
+    </div>
 
     <div class="status-bar">
         <div class="status-card">
@@ -636,6 +706,13 @@ function showMessage(msg) {
     if (el) el.textContent = msg;
 }
 
+function updateDot(id, connected) {
+    const dot = document.getElementById(id);
+    if (!dot) return;
+    dot.classList.remove("connected", "disconnected");
+    dot.classList.add(connected ? "connected" : "disconnected");
+}
+
 function rotateFromClick(event) {
     const rect = event.currentTarget.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
@@ -697,8 +774,17 @@ function pollStatus() {
 
             const azNum = parseFloat(data.az);
             if (!isNaN(azNum)) setNeedle(azNum);
+
+            // Update hardware connection indicators
+            if (data.hw) {
+                updateDot("dot-rotator", data.hw.rotator);
+                updateDot("dot-amp", data.hw.amp);
+            }
         })
         .catch(() => {
+            // If poll itself fails, mark both as disconnected
+            updateDot("dot-rotator", false);
+            updateDot("dot-amp", false);
         })
         .finally(() => {
             pollInFlight = false;
@@ -756,7 +842,8 @@ def render_page(msg=""):
         msg=msg,
         needle_deg=data["needle_deg"],
         swr_color=data["swr_color"],
-        temp_color=data["temp_color"]
+        temp_color=data["temp_color"],
+        hw=data["hw"]
     )
 
 
