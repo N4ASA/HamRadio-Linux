@@ -3,9 +3,9 @@
 # ─── Ham Radio Control Center ─────────────────────────────────────────────────
 FLEX_IP="192.168.1.29"
 PI_IP="100.76.124.28"
+PI_WEB="http://${PI_IP}:5000"
+AETHER_0710="$HOME/apps/aethersdr-new/AetherSDR-v0.7.10-x86_64.AppImage"
 AETHER_072="$HOME/apps/aethersdr-new/AetherSDR-v0.7.2-x86_64.AppImage"
-AETHER_061="$HOME/apps/aethersdr-new/AetherSDR-v0.6.1-x86_64.AppImage"
-AETHER_053="$HOME/Pictures/AetherSDR-v0.5.3-x86_64.AppImage"
 FLEXSPOTS="$HOME/hamradio-linux/flexspots.py"
 BRIDGE="$HOME/flex-to-log4om.py"
 
@@ -14,14 +14,15 @@ CHOICES=$(zenity --list --checklist \
   --text="Select programs to launch:" \
   --column="Pick" --column="Program" \
   FALSE "🚀 Full Station Startup" \
+  FALSE "📡 AetherSDR v0.7.10" \
   FALSE "📡 AetherSDR v0.7.2" \
-  FALSE "📡 AetherSDR v0.6.1" \
-  FALSE "📡 AetherSDR v0.5.3" \
   FALSE "🎯 FlexSpots for Linux" \
   FALSE "📝 Flex to Log4OM Bridge" \
   FALSE "📋 CQRLOG" \
   FALSE "📋 Startup (CQRLOG & QRZ Uploader)" \
-  --height=450 --width=500 2>/dev/null)
+  FALSE "🌐 Web Amp/Rotor Control" \
+  FALSE "⛔ Shut Down All" \
+  --height=500 --width=500 2>/dev/null)
 
 [ -z "$CHOICES" ] && exit 0
 
@@ -34,12 +35,20 @@ start_tunnel() {
   fi
 }
 
+# ─── Helper: stop SSH tunnel ──────────────────────────────────────────────────
+stop_tunnel() {
+  pkill -f "ssh.*4992:${FLEX_IP}:4992" 2>/dev/null
+}
+
+# ─── Helper: hand control back to Windows via Pi web API ──────────────────────
+hand_to_windows() {
+  curl -s -X POST "${PI_WEB}/windows" >/dev/null 2>&1 || true
+}
+
 # ─── Full Station Startup ─────────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Full Station Startup"; then
-  # Start tunnel
   start_tunnel
 
-  # Start FlexSpots
   sleep 8
   if ! pgrep -f flexspots.py > /dev/null; then
     nohup python3 "$FLEXSPOTS" >/dev/null 2>&1 &
@@ -47,20 +56,28 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
     (sleep 10 && wmctrl -l | grep -i flex | awk '{print $1}' | xargs -I{} xdotool windowminimize {}) &
   fi
 
-  # Start bridge
   if ! pgrep -f flex-to-log4om.py > /dev/null; then
     nohup python3 "$BRIDGE" >/dev/null 2>&1 &
     sleep 1
   fi
 
-  # Start AetherSDR v0.7.2
-  if ! pgrep -f AetherSDR-v0.7.2 > /dev/null; then
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-072" \
-    "$AETHER_072" >/dev/null 2>&1 &
+  if ! pgrep -f AetherSDR-v0.7.10 > /dev/null; then
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0710" \
+    "$AETHER_0710" >/dev/null 2>&1 &
   fi
 
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• FlexSpots\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.2" --timeout=4 2>/dev/null &
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• FlexSpots\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.10" --timeout=4 2>/dev/null &
   exit 0
+fi
+
+# ─── AetherSDR v0.7.10 ───────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "AetherSDR v0.7.10"; then
+  if pgrep -f AetherSDR-v0.7.10 > /dev/null; then
+    wmctrl -x -a AetherSDR-v0.7.10-x86_64.AppImage.AetherSDR 2>/dev/null
+  else
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0710" \
+    "$AETHER_0710" >/dev/null 2>&1 &
+  fi
 fi
 
 # ─── AetherSDR v0.7.2 ────────────────────────────────────────────────────────
@@ -70,21 +87,6 @@ if echo "$CHOICES" | grep -q "AetherSDR v0.7.2"; then
   else
     nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-072" \
     "$AETHER_072" >/dev/null 2>&1 &
-  fi
-fi
-
-# ─── AetherSDR v0.6.1 ────────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.6.1"; then
-  nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new" \
-  "$AETHER_061" >/dev/null 2>&1 &
-fi
-
-# ─── AetherSDR v0.5.3 ────────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.5.3"; then
-  if pgrep -f AetherSDR-v0.5.3 > /dev/null; then
-    wmctrl -a AetherSDR 2>/dev/null
-  else
-    "$AETHER_053" &
   fi
 fi
 
@@ -125,6 +127,39 @@ if echo "$CHOICES" | grep -q "Startup (CQRLOG & QRZ Uploader)"; then
   else
     /home/dparker100/launch-hamradio.sh &
   fi
+fi
+
+# ─── Web Amp/Rotor Control ───────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "Web Amp/Rotor Control"; then
+  xdg-open "${PI_WEB}" 2>/dev/null &
+fi
+
+# ─── Shut Down All ───────────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "Shut Down All"; then
+  zenity --question \
+    --title="Shut Down All" \
+    --text="This will stop all ham radio processes and hand control back to Windows.\n\nAre you sure?" \
+    --ok-label="Yes, Shut Down" \
+    --cancel-label="Cancel" 2>/dev/null || exit 0
+
+  # Hand USB control back to Windows before killing anything
+  hand_to_windows
+  sleep 1
+
+  # Kill all ham radio processes
+  pkill -f AetherSDR        2>/dev/null
+  pkill -f flexspots.py     2>/dev/null
+  pkill -f flex-to-log4om   2>/dev/null
+  pkill -f cqrlog_qrz.py    2>/dev/null
+  pkill -x cqrlog           2>/dev/null
+  pkill -f launch-hamradio  2>/dev/null
+
+  # Stop SSH tunnel last
+  sleep 1
+  stop_tunnel
+
+  zenity --info --text="✅ All processes stopped.\nControl handed back to Windows." --timeout=3 2>/dev/null &
+  exit 0
 fi
 
 wait
