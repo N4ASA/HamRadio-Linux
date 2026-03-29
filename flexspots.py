@@ -79,6 +79,7 @@ class Settings:
         "band_filter":           [],
         "clusters":              DEFAULT_CLUSTERS,
         "active_clusters":       ["W3LPL"],
+        "spot_click_tune":       false,
     }
 
     def __init__(self):
@@ -215,7 +216,7 @@ class FlexThread(QThread):
             try: self._sock.sendall(msg.encode("utf-8"))
             except Exception as e: self.log_message.emit(f"[FLEX] Send error: {e}")
 
-    def send_spot(self, spot, color="#FFFFFF", lifetime=1800):
+    def send_spot(self, spot, color="#FFFFFF", lifetime=1800, tune_action=False):
         if not self._running or not self._sock: return
         freq = f"{spot['freq_mhz']:.6f}"
         mode = spot.get("mode","USB")
@@ -227,7 +228,7 @@ class FlexThread(QThread):
         cmd = (f"spot add rx_freq={freq} callsign={spot['callsign']} "
                f"mode={ssdr_mode} color={color} "
                f"source=FlexSpotsLinux spotter_callsign={spot.get('spotter','')} "
-               f"lifetime_seconds={lifetime}")
+               f"lifetime_seconds={lifetime} trigger_action={'tune' if tune_action else 'none'}")
         comment = spot.get("comment","")[:64]
         if comment: cmd += f" comment={comment!r}"
         self._send_cmd(cmd)
@@ -400,6 +401,8 @@ class SettingsDialog(QDialog):
         self.auto_flex = QCheckBox("Auto-connect FlexRadio on startup")
         rf.addRow("", self.auto_flex)
         self.auto_clusters = QCheckBox("Auto-connect clusters on startup")
+        self.spot_click_tune = QCheckBox("Enable spot click tuning (tune slice on spot click)")
+        rf.addRow("", self.spot_click_tune)
         rf.addRow("", self.auto_clusters)
         tabs.addTab(radio_tab, "Radio / Callsign")
         layout.addWidget(tabs)
@@ -414,6 +417,7 @@ class SettingsDialog(QDialog):
         self.max_spots.setValue(self.settings.get("max_spots", 200))
         self.auto_flex.setChecked(self.settings.get("auto_connect_flex", False))
         self.auto_clusters.setChecked(self.settings.get("auto_connect_clusters", False))
+        self.spot_click_tune.setChecked(self.settings.get("spot_click_tune", False))
 
     def _save_and_accept(self):
         self.settings.set("flex_ip",               self.flex_ip.text().strip())
@@ -422,6 +426,7 @@ class SettingsDialog(QDialog):
         self.settings.set("max_spots",             self.max_spots.value())
         self.settings.set("auto_connect_flex",     self.auto_flex.isChecked())
         self.settings.set("auto_connect_clusters", self.auto_clusters.isChecked())
+        self.settings.set("spot_click_tune",       self.spot_click_tune.isChecked())
         self.accept()
 
 
@@ -770,6 +775,7 @@ class MainWindow(QMainWindow):
     def _push_to_flex(self, spot):
         if self.flex_thread and self.flex_thread.isRunning():
             self.flex_thread.send_spot(spot,
+                tune_action=self.settings.get("spot_click_tune", False),
                 color=self._spot_color(spot),
                 lifetime=self.settings.get("spot_lifetime", 1800))
 
