@@ -49,12 +49,6 @@ hand_to_windows() {
 if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
 
-  sleep 8
-  if ! pgrep -f flexspots.py > /dev/null; then
-    nohup python3 "$FLEXSPOTS" >/dev/null 2>&1 &
-    sleep 4
-    (sleep 10 && wmctrl -l | grep -i flex | awk '{print $1}' | xargs -I{} xdotool windowminimize {}) &
-  fi
 
   if ! pgrep -f flex-to-log4om.py > /dev/null; then
     nohup python3 "$BRIDGE" >/dev/null 2>&1 &
@@ -66,7 +60,8 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
     "$AETHER_0710" >/dev/null 2>&1 &
   fi
 
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• FlexSpots\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.10" --timeout=4 2>/dev/null &
+  xdg-open "${PI_WEB}" 2>/dev/null &
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.10\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
   exit 0
 fi
 
