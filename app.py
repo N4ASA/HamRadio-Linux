@@ -330,7 +330,7 @@ HTML = """
             margin-bottom: 10px;
         }
         .logout-btn {
-            background: #f38ba8;
+            background: #a6e3a1;
             color: #1e1e2e;
             border: none;
             border-radius: 8px;
@@ -471,6 +471,12 @@ HTML = """
             color: #89b4fa;
             text-align: center;
             font-size: 20px;
+        }
+        .footer-panel.vh-error {
+            border-color: #f38ba8;
+        }
+        .footer-panel.vh-error h2 {
+            color: #f38ba8;
         }
         .msg {
             margin-top: 14px;
@@ -685,7 +691,7 @@ HTML = """
         </div>
     </div>
 
-    <div class="footer-panel">
+    <div class="footer-panel{% if vh == 'UNKNOWN' %} vh-error{% endif %}" id="vh-panel">
         <h2>VirtualHere Control</h2>
         <div class="button-grid">
             <button type="button" class="blue" onclick="sendSimpleCommand('/linux')">Use Linux Control</button>
@@ -708,6 +714,8 @@ function updateUI(data) {
     setText("band-value", data.spe.band);
     setText("power-value", data.spe.power);
     setText("vh-value", data.vh);
+            const vhPanel = document.getElementById("vh-panel");
+            if (vhPanel) vhPanel.classList.toggle("vh-error", data.vh === "UNKNOWN");
     setText("operate-value", data.spe.operate);
     const operateBtn = document.getElementById("operate-btn");
     if (operateBtn) {
