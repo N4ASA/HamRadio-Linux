@@ -77,7 +77,12 @@ def get_rotator_position():
     return "---"
 
 
+_spe_cache = {"data": None, "failures": 0}
+_spe_cache_lock = threading.Lock()
+SPE_FAILURE_THRESHOLD = 3
+
 def get_spe_status():
+    result = None
     try:
         ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
         time.sleep(0.25)
@@ -116,7 +121,7 @@ def get_spe_status():
         warnings = parts[18].strip() if len(parts) > 18 else "N"
         alarms = parts[19].strip() if len(parts) > 19 else "N"
 
-        return {
+        result = {
             "operate": operate,
             "tx": tx,
             "band": band,
@@ -129,15 +134,19 @@ def get_spe_status():
     except Exception:
         pass
 
+    with _spe_cache_lock:
+        if result is not None:
+            _spe_cache["data"] = result
+            _spe_cache["failures"] = 0
+            return result
+        else:
+            _spe_cache["failures"] += 1
+            if _spe_cache["data"] is not None and _spe_cache["failures"] < SPE_FAILURE_THRESHOLD:
+                return _spe_cache["data"]
+
     return {
-        "operate": "---",
-        "tx": "---",
-        "band": "---",
-        "power": "---",
-        "swr": "---",
-        "temp": "---",
-        "warnings": "---",
-        "alarms": "---"
+        "operate": "---", "tx": "---", "band": "---", "power": "---",
+        "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
     }
 
 _vh_debounce = {"state": "LINUX CONTROL", "pending": None, "count": 0}
