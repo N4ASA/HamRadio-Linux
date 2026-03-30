@@ -50,6 +50,8 @@ def check_port_available(port, baud):
         return False
 
 def get_hardware_availability():
+    if vh_status() == "WINDOWS CONTROL":
+        return {"rotator": "windows", "amp": "windows"}
     return {
         "rotator": check_port_available(ROT_PORT, ROT_BAUD),
         "amp": check_port_available(SPE_PORT, SPE_BAUD)
@@ -330,6 +332,10 @@ HTML = """
         .hw-dot.disconnected {
             background: #f38ba8;
             box-shadow: 0 0 6px 2px rgba(243, 139, 168, 0.45);
+        }
+        .hw-dot.windows {
+            background: #6c7086;
+            box-shadow: none;
         }
 
         .status-bar {
@@ -747,11 +753,12 @@ function showMessage(msg) {
     if (el) el.textContent = msg;
 }
 
-function updateDot(id, connected) {
+function updateDot(id, state) {
     const dot = document.getElementById(id);
     if (!dot) return;
-    dot.classList.remove("connected", "disconnected");
-    dot.classList.add(connected ? "connected" : "disconnected");
+    dot.classList.remove("connected", "disconnected", "windows");
+    if (state === "windows") dot.classList.add("windows");
+    else dot.classList.add(state ? "connected" : "disconnected");
 }
 
 function rotateFromClick(event) {
