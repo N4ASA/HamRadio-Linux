@@ -5,6 +5,7 @@ FLEX_IP="192.168.1.29"
 PI_IP="100.76.124.28"
 PI_WEB="http://${PI_IP}:5000"
 AETHER_0710="$HOME/apps/aethersdr-new/AetherSDR-v0.7.10-x86_64.AppImage"
+AETHER_0711="$HOME/apps/aethersdr-new/AetherSDR-v0.7.11-x86_64.AppImage"
 AETHER_072="$HOME/apps/aethersdr-new/AetherSDR-v0.7.2-x86_64.AppImage"
 FLEXSPOTS="$HOME/hamradio-linux/flexspots.py"
 BRIDGE="$HOME/flex-to-log4om.py"
@@ -14,6 +15,7 @@ CHOICES=$(zenity --list --checklist \
   --text="Select programs to launch:" \
   --column="Pick" --column="Program" \
   FALSE "🚀 Full Station Startup" \
+  FALSE "📡 AetherSDR v0.7.11" \
   FALSE "📡 AetherSDR v0.7.10" \
   FALSE "📡 AetherSDR v0.7.2" \
   FALSE "🎯 FlexSpots for Linux" \
@@ -55,14 +57,24 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
     sleep 1
   fi
 
-  if ! pgrep -f AetherSDR-v0.7.10 > /dev/null; then
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0710" \
-    "$AETHER_0710" >/dev/null 2>&1 &
+  if ! pgrep -f AetherSDR-v0.7.11 > /dev/null; then
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0711" \
+    "$AETHER_0711" >/dev/null 2>&1 &
   fi
 
   xdg-open "${PI_WEB}" 2>/dev/null &
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.10\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.11\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
   exit 0
+fi
+
+# ─── AetherSDR v0.7.11 ───────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "AetherSDR v0.7.11"; then
+  if pgrep -f AetherSDR-v0.7.11 > /dev/null; then
+    wmctrl -x -a AetherSDR-v0.7.11-x86_64.AppImage.AetherSDR 2>/dev/null
+  else
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0711" \
+    "$AETHER_0711" >/dev/null 2>&1 &
+  fi
 fi
 
 # ─── AetherSDR v0.7.10 ───────────────────────────────────────────────────────

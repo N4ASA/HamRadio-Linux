@@ -79,7 +79,7 @@ class Settings:
         "band_filter":           [],
         "clusters":              DEFAULT_CLUSTERS,
         "active_clusters":       ["W3LPL"],
-        "spot_click_tune":       false,
+        "spot_click_tune":       False,
     }
 
     def __init__(self):
