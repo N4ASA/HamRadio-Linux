@@ -628,7 +628,9 @@ HTML = """
             </div>
 
             <div class="button-grid">
-                <button type="button" class="orange" onclick="sendSimpleCommand('/operate')">Operate / Standby</button>
+                <button type="button" id="operate-btn" class="{% if spe.operate == 'OPERATE' %}green{% else %}red{% endif %}" onclick="sendSimpleCommand('/operate')">
+                    {% if spe.operate == 'OPERATE' %}OPERATE{% else %}STANDBY{% endif %}
+                </button>
                 <button type="button" class="orange" onclick="sendSimpleCommand('/tune')">Tune</button>
                 <button type="button" class="orange" onclick="sendSimpleCommand('/power')">Power Level</button>
             </div>
@@ -763,6 +765,12 @@ function pollStatus() {
             setText("vh-value", data.vh);
 
             setText("operate-value", data.spe.operate);
+            const operateBtn = document.getElementById("operate-btn");
+            if (operateBtn) {
+                const isOperate = data.spe.operate === "OPERATE";
+                operateBtn.textContent = isOperate ? "OPERATE" : "STANDBY";
+                operateBtn.className = isOperate ? "green" : "red";
+            }
             setText("tx-value", data.spe.tx);
             setText("swr-value", data.spe.swr);
             setText("temp-value", data.spe.temp + " F");
