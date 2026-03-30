@@ -53,7 +53,7 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
 
   ssh -i ~/.ssh/ham_radio pi@${PI_IP} \
-    "pgrep -f app.py > /dev/null || nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
+    "sudo systemctl stop virtualhere 2>/dev/null; sleep 1; pgrep -f app.py > /dev/null || nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
 
   if ! pgrep -f flex-to-log4om.py > /dev/null; then
     nohup python3 "$BRIDGE" >/dev/null 2>&1 &
