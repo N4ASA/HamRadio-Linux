@@ -22,9 +22,10 @@ CHOICES=$(zenity --list --checklist \
   FALSE "📝 Flex to Log4OM Bridge" \
   FALSE "📋 CQRLOG" \
   FALSE "📋 Startup (CQRLOG & QRZ Uploader)" \
+  FALSE "🖥️ Start Pi Web Control" \
   FALSE "🌐 Web Amp/Rotor Control" \
   FALSE "⛔ Shut Down All" \
-  --height=500 --width=500 2>/dev/null)
+  --height=550 --width=500 2>/dev/null)
 
 [ -z "$CHOICES" ] && exit 0
 
@@ -51,6 +52,8 @@ hand_to_windows() {
 if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
 
+  ssh -i ~/.ssh/ham_radio pi@${PI_IP} \
+    "pgrep -f app.py > /dev/null || nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
 
   if ! pgrep -f flex-to-log4om.py > /dev/null; then
     nohup python3 "$BRIDGE" >/dev/null 2>&1 &
@@ -136,6 +139,18 @@ if echo "$CHOICES" | grep -q "Startup (CQRLOG & QRZ Uploader)"; then
   fi
 fi
 
+# ─── Start Pi Web Control ────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "Start Pi Web Control"; then
+  if ssh -i ~/.ssh/ham_radio pi@${PI_IP} "pgrep -f app.py > /dev/null"; then
+    zenity --info --text="ℹ️ Pi Web Control is already running." --timeout=2 2>/dev/null &
+  else
+    ssh -i ~/.ssh/ham_radio pi@${PI_IP} \
+      "nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
+    sleep 1
+    zenity --info --text="✅ Pi Web Control started on port 5000." --timeout=2 2>/dev/null &
+  fi
+fi
+
 # ─── Web Amp/Rotor Control ───────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Web Amp/Rotor Control"; then
   xdg-open "${PI_WEB}" 2>/dev/null &
@@ -152,6 +167,9 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
   # Hand USB control back to Windows before killing anything
   hand_to_windows
   sleep 1
+
+  # Stop app.py on Pi
+  ssh -i ~/.ssh/ham_radio pi@${PI_IP} "pkill -f app.py" 2>/dev/null
 
   # Kill all ham radio processes
   pkill -f AetherSDR        2>/dev/null
