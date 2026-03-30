@@ -35,6 +35,15 @@ QRZ_PASSWORD=config.get("QRZ_PASSWORD","")
 WORKED_COLOR=config.get("WORKED_COLOR","#00FF7F")
 current_freq=14100000;current_mode="USB"
 freq_lock=threading.Lock();spot_db={};spot_lock=threading.Lock()
+_spot_timer=None;_spot_timer_lock=threading.Lock()
+
+def schedule_spot_dialog(spots,freq_mhz,mode,dwell=0.5):
+    global _spot_timer
+    with _spot_timer_lock:
+        if _spot_timer is not None:
+            _spot_timer.cancel()
+        t=threading.Timer(dwell,lambda: threading.Thread(target=pick_and_emit,args=(spots,freq_mhz,mode),daemon=True).start())
+        t.daemon=True;t.start();_spot_timer=t
 qrz_session=None;qrz_lock=threading.Lock()
 MODE_MAP={"USB":"USB","LSB":"LSB","CW":"CW","CWR":"CW","AM":"AM","FM":"FM","DIGU":"USB","DIGL":"LSB","RTTY":"RTTY","SAM":"AM"}
 BAND_MAP=[(1.8,2.0,"160m"),(3.5,4.0,"80m"),(5.3,5.5,"60m"),(7.0,7.3,"40m"),(10.1,10.15,"30m"),(14.0,14.35,"20m"),(18.068,18.168,"17m"),(21.0,21.45,"15m"),(24.89,24.99,"12m"),(28.0,29.7,"10m"),(50.0,54.0,"6m"),(144.0,148.0,"2m")]
@@ -389,8 +398,11 @@ def monitor_flex():
                                     if spots:
                                         names=",".join([s[1]['callsign'] for s in spots])
                                         print(f"\n✓ {new_freq_mhz:.3f} MHz {new_mode} → {names}")
-                                        threading.Thread(target=pick_and_emit,args=(spots,new_freq_mhz,mode),daemon=True).start()
-                                    else: print(f"\n  {new_freq_mhz:.3f} MHz {new_mode} (no spot)")
+                                        schedule_spot_dialog(spots,new_freq_mhz,mode)
+                                    else:
+                                        with _spot_timer_lock:
+                                            if _spot_timer is not None: _spot_timer.cancel()
+                                        print(f"\n  {new_freq_mhz:.3f} MHz {new_mode} (no spot)")
                 except socket.timeout: continue
                 except Exception as e: print(f"Flex lost: {e}"); break
             s.close()
