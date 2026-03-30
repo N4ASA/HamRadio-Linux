@@ -97,7 +97,7 @@ def get_spe_status():
             "04": "30m", "05": "20m", "06": "17m", "07": "15m",
             "08": "12m", "09": "10m", "10": "6m", "11": "4m"
         }
-        band = band_map.get(parts[5], parts[5] + "m")
+        band = band_map.get(parts[6], parts[6] + "m")
 
         power_map = {"L": "LOW", "M": "MID", "H": "HIGH"}
         power = power_map.get(parts[9], parts[9])
