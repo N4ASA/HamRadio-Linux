@@ -162,10 +162,21 @@ def temp_class(value):
         return "neutral"
 
 def get_status_payload():
-    az = get_rotator_position()
-    spe = get_spe_status()
     vh = vh_status()
-    hw = get_hardware_availability()
+    windows_mode = (vh == "WINDOWS CONTROL")
+
+    if windows_mode:
+        az = "---"
+        spe = {
+            "operate": "---", "tx": "---", "band": "---", "power": "---",
+            "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
+        }
+        hw = {"rotator": "windows", "amp": "windows"}
+    else:
+        az = get_rotator_position()
+        spe = get_spe_status()
+        hw = get_hardware_availability()
+
     try:
         az_num = float(az)
     except Exception:
