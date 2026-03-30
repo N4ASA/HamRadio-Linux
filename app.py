@@ -4,6 +4,7 @@ import serial
 import time
 import os
 import json
+import threading
 
 app = Flask(__name__)
 
@@ -140,6 +141,7 @@ def get_spe_status():
     }
 
 _vh_debounce = {"state": "LINUX CONTROL", "pending": None, "count": 0}
+_vh_lock = threading.Lock()
 
 def vh_status():
     try:
@@ -149,23 +151,24 @@ def vh_status():
         )
         new = "WINDOWS CONTROL" if result.stdout.strip() == "active" else "LINUX CONTROL"
     except Exception:
-        new = _vh_debounce["state"]
+        with _vh_lock:
+            return _vh_debounce["state"]
 
-    if new == _vh_debounce["state"]:
-        _vh_debounce["pending"] = None
-        _vh_debounce["count"] = 0
-    else:
-        if new == _vh_debounce["pending"]:
-            _vh_debounce["count"] += 1
-        else:
-            _vh_debounce["pending"] = new
-            _vh_debounce["count"] = 1
-        if _vh_debounce["count"] >= 2:
-            _vh_debounce["state"] = new
+    with _vh_lock:
+        if new == _vh_debounce["state"]:
             _vh_debounce["pending"] = None
             _vh_debounce["count"] = 0
-
-    return _vh_debounce["state"]
+        else:
+            if new == _vh_debounce["pending"]:
+                _vh_debounce["count"] += 1
+            else:
+                _vh_debounce["pending"] = new
+                _vh_debounce["count"] = 1
+            if _vh_debounce["count"] >= 2:
+                _vh_debounce["state"] = new
+                _vh_debounce["pending"] = None
+                _vh_debounce["count"] = 0
+        return _vh_debounce["state"]
 
 def swr_class(value):
     try:
