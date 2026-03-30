@@ -7,5 +7,3 @@ PyQt6
 requests
 mysql-connector-python
 
-# hamradio-control/hamradio_control.py (PyQt5 - pending migration to PyQt6)
-PyQt5
