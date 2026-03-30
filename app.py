@@ -631,7 +631,7 @@ HTML = """
                 <button type="button" id="operate-btn" class="{% if spe.operate == 'OPERATE' %}green{% else %}red{% endif %}" onclick="sendSimpleCommand('/operate')">
                     {% if spe.operate == 'OPERATE' %}OPERATE{% else %}STANDBY{% endif %}
                 </button>
-                <button type="button" class="orange" onclick="sendSimpleCommand('/tune')">Tune</button>
+                <button type="button" id="tune-btn" class="{% if spe.tx == 'TX' %}red{% else %}orange{% endif %}" onclick="sendSimpleCommand('/tune')">Tune{% if spe.tx == 'TX' %} (TUNING){% endif %}</button>
                 <button type="button" class="orange" onclick="sendSimpleCommand('/power')">Power Level</button>
             </div>
         </div>
@@ -772,6 +772,12 @@ function pollStatus() {
                 operateBtn.className = isOperate ? "green" : "red";
             }
             setText("tx-value", data.spe.tx);
+            const tuneBtn = document.getElementById("tune-btn");
+            if (tuneBtn) {
+                const isTx = data.spe.tx === "TX";
+                tuneBtn.textContent = isTx ? "Tune (TUNING)" : "Tune";
+                tuneBtn.className = isTx ? "red" : "orange";
+            }
             setText("swr-value", data.spe.swr);
             setText("temp-value", data.spe.temp + " F");
             setText("warn-value", "W: " + data.spe.warnings + "   A: " + data.spe.alarms);
