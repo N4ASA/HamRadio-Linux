@@ -1,8 +1,9 @@
-from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, Response
 import subprocess
 import serial
 import time
 import os
+import json
 
 app = Flask(__name__)
 
@@ -650,6 +651,44 @@ HTML = """
 let currentAz = {{ needle_deg|tojson }};
 let pollInFlight = false;
 
+function updateUI(data) {
+    if (data.error) {
+        updateDot("dot-rotator", false);
+        updateDot("dot-amp", false);
+        return;
+    }
+    setText("az-value", data.az + "°");
+    setText("band-value", data.spe.band);
+    setText("power-value", data.spe.power);
+    setText("vh-value", data.vh);
+    setText("operate-value", data.spe.operate);
+    const operateBtn = document.getElementById("operate-btn");
+    if (operateBtn) {
+        const isOperate = data.spe.operate === "OPERATE";
+        operateBtn.textContent = isOperate ? "OPERATE" : "STANDBY";
+        operateBtn.className = isOperate ? "green" : "red";
+    }
+    setText("tx-value", data.spe.tx);
+    const tuneBtn = document.getElementById("tune-btn");
+    if (tuneBtn) {
+        const isTx = data.spe.tx === "TX";
+        tuneBtn.textContent = isTx ? "Tune (TUNING)" : "Tune";
+        tuneBtn.className = isTx ? "red" : "orange";
+    }
+    setText("swr-value", data.spe.swr);
+    setText("temp-value", data.spe.temp + " F");
+    setText("warn-value", "W: " + data.spe.warnings + "   A: " + data.spe.alarms);
+    setClass("swr-value", data.swr_color);
+    setClass("temp-value", data.temp_color);
+    setClass("warn-value", (data.spe.warnings !== "N" || data.spe.alarms !== "N") ? "alert" : "ok");
+    const azNum = parseFloat(data.az);
+    if (!isNaN(azNum)) setNeedle(azNum);
+    if (data.hw) {
+        updateDot("dot-rotator", data.hw.rotator);
+        updateDot("dot-amp", data.hw.amp);
+    }
+}
+
 function normalizeAngle(angle) {
     angle = angle % 360;
     if (angle < 0) angle += 360;
@@ -752,61 +791,23 @@ function sendSimpleCommand(path) {
 function pollStatus() {
     if (pollInFlight) return;
     pollInFlight = true;
-
     fetch("/status")
-        .then(response => {
-            if (!response.ok) throw new Error("status fetch failed");
-            return response.json();
-        })
-        .then(data => {
-            setText("az-value", data.az + "°");
-            setText("band-value", data.spe.band);
-            setText("power-value", data.spe.power);
-            setText("vh-value", data.vh);
-
-            setText("operate-value", data.spe.operate);
-            const operateBtn = document.getElementById("operate-btn");
-            if (operateBtn) {
-                const isOperate = data.spe.operate === "OPERATE";
-                operateBtn.textContent = isOperate ? "OPERATE" : "STANDBY";
-                operateBtn.className = isOperate ? "green" : "red";
-            }
-            setText("tx-value", data.spe.tx);
-            const tuneBtn = document.getElementById("tune-btn");
-            if (tuneBtn) {
-                const isTx = data.spe.tx === "TX";
-                tuneBtn.textContent = isTx ? "Tune (TUNING)" : "Tune";
-                tuneBtn.className = isTx ? "red" : "orange";
-            }
-            setText("swr-value", data.spe.swr);
-            setText("temp-value", data.spe.temp + " F");
-            setText("warn-value", "W: " + data.spe.warnings + "   A: " + data.spe.alarms);
-
-            setClass("swr-value", data.swr_color);
-            setClass("temp-value", data.temp_color);
-            setClass("warn-value", (data.spe.warnings !== "N" || data.spe.alarms !== "N") ? "alert" : "ok");
-
-            const azNum = parseFloat(data.az);
-            if (!isNaN(azNum)) setNeedle(azNum);
-
-            // Update hardware connection indicators
-            if (data.hw) {
-                updateDot("dot-rotator", data.hw.rotator);
-                updateDot("dot-amp", data.hw.amp);
-            }
-        })
-        .catch(() => {
-            // If poll itself fails, mark both as disconnected
-            updateDot("dot-rotator", false);
-            updateDot("dot-amp", false);
-        })
-        .finally(() => {
-            pollInFlight = false;
-        });
+        .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+        .then(data => updateUI(data))
+        .catch(() => { updateDot("dot-rotator", false); updateDot("dot-amp", false); })
+        .finally(() => { pollInFlight = false; });
 }
 
 setNeedle(currentAz);
-setInterval(pollStatus, 2500);
+
+const evtSource = new EventSource("/stream");
+evtSource.onmessage = function(e) {
+    try { updateUI(JSON.parse(e.data)); } catch(_) {}
+};
+evtSource.onerror = function() {
+    updateDot("dot-rotator", false);
+    updateDot("dot-amp", false);
+};
 </script>
 </body>
 </html>
@@ -890,6 +891,24 @@ def status():
         return jsonify({"error": "not_logged_in"}), 401
     return jsonify(get_status_payload())
 
+@app.route("/stream")
+def stream():
+    if not is_logged_in():
+        return jsonify({"error": "not_logged_in"}), 401
+    def generate():
+        while True:
+            try:
+                data = get_status_payload()
+                yield f"data: {json.dumps(data)}\n\n"
+                time.sleep(2.5)
+            except GeneratorExit:
+                break
+            except Exception:
+                yield f"data: {json.dumps({'error': 'status_error'})}\n\n"
+                time.sleep(2.5)
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 @app.route("/rotate", methods=["POST"])
 def rotate():
     auth = require_login()
@@ -954,4 +973,4 @@ def windows():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, threaded=True)
