@@ -179,6 +179,9 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
   pkill -x cqrlog           2>/dev/null
   pkill -f launch-hamradio  2>/dev/null
 
+  # Close Ham Radio Remote Control browser tab
+  wmctrl -c "Ham Radio Remote Control" 2>/dev/null
+
   # Stop SSH tunnel last
   sleep 1
   stop_tunnel
