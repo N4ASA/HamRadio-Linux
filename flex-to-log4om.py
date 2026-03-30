@@ -37,7 +37,7 @@ current_freq=14100000;current_mode="USB"
 freq_lock=threading.Lock();spot_db={};spot_lock=threading.Lock()
 _spot_timer=None;_spot_timer_lock=threading.Lock()
 
-def schedule_spot_dialog(spots,freq_mhz,mode,dwell=0.5):
+def schedule_spot_dialog(spots,freq_mhz,mode,dwell=2.0):
     global _spot_timer
     with _spot_timer_lock:
         if _spot_timer is not None:
