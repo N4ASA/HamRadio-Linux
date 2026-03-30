@@ -139,15 +139,33 @@ def get_spe_status():
         "alarms": "---"
     }
 
+_vh_debounce = {"state": "LINUX CONTROL", "pending": None, "count": 0}
+
 def vh_status():
     try:
         result = subprocess.run(
             ["systemctl", "is-active", "virtualhere"],
             capture_output=True, text=True
         )
-        return "WINDOWS CONTROL" if result.stdout.strip() == "active" else "LINUX CONTROL"
+        new = "WINDOWS CONTROL" if result.stdout.strip() == "active" else "LINUX CONTROL"
     except Exception:
-        return "UNKNOWN"
+        new = _vh_debounce["state"]
+
+    if new == _vh_debounce["state"]:
+        _vh_debounce["pending"] = None
+        _vh_debounce["count"] = 0
+    else:
+        if new == _vh_debounce["pending"]:
+            _vh_debounce["count"] += 1
+        else:
+            _vh_debounce["pending"] = new
+            _vh_debounce["count"] = 1
+        if _vh_debounce["count"] >= 2:
+            _vh_debounce["state"] = new
+            _vh_debounce["pending"] = None
+            _vh_debounce["count"] = 0
+
+    return _vh_debounce["state"]
 
 def swr_class(value):
     try:
