@@ -30,6 +30,29 @@ ROT_BAUD = 9600
 SPE_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AI040U5P-if00-port0"
 SPE_BAUD = 9600
 
+ROTOR_TARGET_UDP_PORT = 12346
+_target_az = None
+_target_lock = threading.Lock()
+
+def _udp_target_listener():
+    import socket as _socket
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(('', ROTOR_TARGET_UDP_PORT))
+        sock.settimeout(1.0)
+        while True:
+            try:
+                data, _ = sock.recvfrom(64)
+                msg = data.decode('ascii', errors='ignore').strip()
+                if msg.startswith('GOTO:'):
+                    global _target_az
+                    with _target_lock:
+                        _target_az = float(msg[5:])
+            except Exception:
+                pass
+
+threading.Thread(target=_udp_target_listener, daemon=True).start()
+
 # ----------- AUTH -----------
 def is_logged_in():
     return session.get("logged_in", False)
@@ -77,77 +100,74 @@ def get_rotator_position():
     return "---"
 
 
-_spe_cache = {"data": None, "failures": 0}
-_spe_cache_lock = threading.Lock()
-SPE_FAILURE_THRESHOLD = 3
+_spe_state = None
+_spe_state_lock = threading.Lock()
+_SPE_FAILURE = {
+    "operate": "---", "tx": "---", "band": "---", "power": "---",
+    "fwd_watts": "---", "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
+}
+
+def _parse_spe(data):
+    text = data.decode("ascii", errors="ignore")
+    idx = text.find("C,")
+    if idx == -1:
+        raise ValueError("No C, found")
+    parts = [p.strip() for p in text[idx:].strip().split(",")]
+    band_map = {
+        "00": "160m", "01": "80m", "02": "60m", "03": "40m",
+        "04": "30m", "05": "20m", "06": "17m", "07": "15m",
+        "08": "12m", "09": "10m", "10": "6m", "11": "4m"
+    }
+    try: fwd_watts = str(int(parts[10].strip())) + "W" if len(parts) > 10 else "---"
+    except Exception: fwd_watts = "---"
+    try: temp = str(int(float(parts[15].strip()))) if len(parts) > 15 else "---"
+    except Exception: temp = "---"
+    return {
+        "operate": "OPERATE" if parts[2] == "O" else "STANDBY",
+        "tx": "TX" if parts[3] == "T" else "RX",
+        "band": band_map.get(parts[6], parts[6] + "m"),
+        "power": {"L": "LOW", "M": "MID", "H": "HIGH"}.get(parts[9], parts[9]),
+        "fwd_watts": fwd_watts,
+        "swr": parts[11].strip() if len(parts) > 11 else "---",
+        "temp": temp,
+        "warnings": parts[18].strip() if len(parts) > 18 else "N",
+        "alarms": parts[19].strip() if len(parts) > 19 else "N",
+    }
+
+def _spe_monitor():
+    """Background thread: keeps serial port open and polls amp as fast as possible."""
+    global _spe_state
+    consecutive_failures = 0
+    while True:
+        try:
+            ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=1)
+            time.sleep(0.25)
+            consecutive_failures = 0
+            while True:
+                try:
+                    ser.write(bytes([0x55, 0x55, 0x55, 0x01, 0x90, 0x90]))
+                    time.sleep(0.35)
+                    data = ser.read(200)
+                    result = _parse_spe(data)
+                    with _spe_state_lock:
+                        _spe_state = result
+                    consecutive_failures = 0
+                    time.sleep(0.4)
+                except Exception:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        break
+                    time.sleep(0.5)
+        except Exception:
+            with _spe_state_lock:
+                _spe_state = None
+            time.sleep(3)
+
+threading.Thread(target=_spe_monitor, daemon=True).start()
 
 def get_spe_status():
-    result = None
-    try:
-        ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
-        time.sleep(0.25)
-        ser.write(bytes([0x55, 0x55, 0x55, 0x01, 0x90, 0x90]))
-        time.sleep(0.35)
-        data = ser.read(200)
-        ser.close()
-
-        text = data.decode("ascii", errors="ignore")
-        idx = text.find("C,")
-        if idx == -1:
-            raise ValueError("No valid data found")
-        text = text[idx:]
-        parts = [p.strip() for p in text.strip().split(",")]
-
-        operate = "OPERATE" if parts[2] == "O" else "STANDBY"
-        tx = "TX" if parts[3] == "T" else "RX"
-
-        band_map = {
-            "00": "160m", "01": "80m", "02": "60m", "03": "40m",
-            "04": "30m", "05": "20m", "06": "17m", "07": "15m",
-            "08": "12m", "09": "10m", "10": "6m", "11": "4m"
-        }
-        band = band_map.get(parts[6], parts[6] + "m")
-
-        power_map = {"L": "LOW", "M": "MID", "H": "HIGH"}
-        power = power_map.get(parts[9], parts[9])
-
-        swr = parts[11].strip() if len(parts) > 11 else "---"
-
-        try:
-            temp = str(int(float(parts[15].strip()))) if len(parts) > 15 else "---"
-        except Exception:
-            temp = "---"
-
-        warnings = parts[18].strip() if len(parts) > 18 else "N"
-        alarms = parts[19].strip() if len(parts) > 19 else "N"
-
-        result = {
-            "operate": operate,
-            "tx": tx,
-            "band": band,
-            "power": power,
-            "swr": swr,
-            "temp": temp,
-            "warnings": warnings,
-            "alarms": alarms
-        }
-    except Exception:
-        pass
-
-    with _spe_cache_lock:
-        if result is not None:
-            _spe_cache["data"] = result
-            _spe_cache["failures"] = 0
-            return result
-        else:
-            _spe_cache["failures"] += 1
-            if _spe_cache["data"] is not None and _spe_cache["failures"] < SPE_FAILURE_THRESHOLD:
-                return _spe_cache["data"]
-
-    return {
-        "operate": "---", "tx": "---", "band": "---", "power": "---",
-        "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
-    }
+    with _spe_state_lock:
+        return _spe_state if _spe_state is not None else _SPE_FAILURE
 
 _vh_debounce = {"state": "LINUX CONTROL", "pending": None, "count": 0}
 _vh_lock = threading.Lock()
@@ -199,7 +219,7 @@ def get_status_payload():
         az = "---"
         spe = {
             "operate": "---", "tx": "---", "band": "---", "power": "---",
-            "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
+            "fwd_watts": "---", "swr": "---", "temp": "---", "warnings": "---", "alarms": "---"
         }
         hw = {"rotator": "windows", "amp": "windows"}
     else:
@@ -211,6 +231,9 @@ def get_status_payload():
         az_num = float(az)
     except Exception:
         az_num = 0
+    with _target_lock:
+        tgt = _target_az
+    target_str = f"{tgt:.0f}°" if tgt is not None else "---"
     return {
         "az": az,
         "needle_deg": az_num,
@@ -218,7 +241,8 @@ def get_status_payload():
         "vh": vh,
         "swr_color": swr_class(spe["swr"]),
         "temp_color": temp_class(spe["temp"]),
-        "hw": hw
+        "hw": hw,
+        "target_az": target_str
     }
 
 
@@ -381,7 +405,7 @@ HTML = """
 
         .status-bar {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 10px;
             margin-bottom: 14px;
         }
@@ -597,12 +621,20 @@ HTML = """
             <div class="status-value" id="az-value">{{ az }}°</div>
         </div>
         <div class="status-card">
+            <div class="status-label">Moving To</div>
+            <div class="status-value" id="target-az-value" style="color:#f9e2af;">{{ target_az }}</div>
+        </div>
+        <div class="status-card">
             <div class="status-label">Amp Band</div>
             <div class="status-value" id="band-value">{{ spe.band }}</div>
         </div>
         <div class="status-card">
             <div class="status-label">Amp Output</div>
             <div class="status-value" id="power-value">{{ spe.power }}</div>
+        </div>
+        <div class="status-card">
+            <div class="status-label">Pwr Out</div>
+            <div class="status-value" id="fwd-watts-value">{{ spe.fwd_watts }}</div>
         </div>
         <div class="status-card">
             <div class="status-label">VirtualHere</div>
@@ -711,8 +743,10 @@ function updateUI(data) {
         return;
     }
     setText("az-value", data.az + "°");
+    if (data.target_az !== undefined) setText("target-az-value", data.target_az);
     setText("band-value", data.spe.band);
     setText("power-value", data.spe.power);
+    setText("fwd-watts-value", data.spe.fwd_watts);
     setText("vh-value", data.vh);
             const vhPanel = document.getElementById("vh-panel");
             if (vhPanel) vhPanel.classList.toggle("vh-error", data.vh === "UNKNOWN");
@@ -723,7 +757,11 @@ function updateUI(data) {
         operateBtn.textContent = isOperate ? "OPERATE" : "STANDBY";
         operateBtn.className = isOperate ? "green" : "red";
     }
-    setText("tx-value", data.spe.tx);
+    const txEl = document.getElementById("tx-value");
+    if (txEl) {
+        txEl.textContent = data.spe.tx;
+        txEl.style.color = data.spe.tx === "TX" ? "#f38ba8" : "";
+    }
     const tuneBtn = document.getElementById("tune-btn");
     if (tuneBtn) {
         const isTx = data.spe.tx === "TX";
@@ -956,12 +994,12 @@ def stream():
             try:
                 data = get_status_payload()
                 yield f"data: {json.dumps(data)}\n\n"
-                time.sleep(2.5)
+                time.sleep(1)
             except GeneratorExit:
                 break
             except Exception:
                 yield f"data: {json.dumps({'error': 'status_error'})}\n\n"
-                time.sleep(2.5)
+                time.sleep(1)
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -972,6 +1010,9 @@ def rotate():
         return auth
     az = request.form["azimuth"]
     rotate_to(az)
+    global _target_az
+    with _target_lock:
+        _target_az = float(az)
     return ("", 204)
 
 @app.route("/stop", methods=["POST"])
@@ -1027,6 +1068,25 @@ def windows():
     subprocess.run(["sudo", "systemctl", "start", "virtualhere"])
     return ("", 204)
 
+
+@app.route("/spe-raw")
+def spe_raw():
+    try:
+        ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
+        time.sleep(0.25)
+        ser.write(bytes([0x55, 0x55, 0x55, 0x01, 0x90, 0x90]))
+        time.sleep(0.35)
+        data = ser.read(200)
+        ser.close()
+        text = data.decode("ascii", errors="ignore")
+        idx = text.find("C,")
+        if idx == -1:
+            return jsonify({"error": "No C, found", "raw": text})
+        text = text[idx:]
+        parts = [p.strip() for p in text.strip().split(",")]
+        return jsonify({str(i): v for i, v in enumerate(parts)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, threaded=True)

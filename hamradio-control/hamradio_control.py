@@ -9,24 +9,26 @@ Requires: PyQt5, pyserial
 """
 
 import sys
+import socket
 import serial
 import threading
 import time
 import math
 from datetime import datetime
 
-from PyQt6.QtWidgets import (
+from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTabWidget, QGroupBox, QLineEdit,
     QStatusBar, QSpinBox, QFormLayout, QTextEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QBrush
 
 SPE_PORT = "/dev/ttyUSB0"
 SPE_BAUD = 9600
 ROT_PORT = "/dev/ttyUSB1"
 ROT_BAUD = 9600
+ROTOR_UDP_PORT = 12345
 
 BANDS = {
     "00": "160m", "01": "80m", "02": "60m", "03": "40m",
@@ -237,7 +239,7 @@ class CompassWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
         cx, cy = w // 2, h // 2
         r = min(w, h) // 2 - 20
@@ -245,7 +247,7 @@ class CompassWidget(QWidget):
         painter.setPen(QPen(QColor("#45475a"), 2))
         painter.drawEllipse(cx - r, cy - r, r * 2, r * 2)
         painter.setPen(QPen(QColor("#89b4fa")))
-        painter.setFont(QFont("Sans", 10, QFont.Weight.Bold))
+        painter.setFont(QFont("Sans", 10, QFont.Bold))
         for label, angle in [("N", 0), ("E", 90), ("S", 180), ("W", 270)]:
             rad = math.radians(angle - 90)
             x = cx + int((r - 15) * math.cos(rad))
@@ -264,7 +266,7 @@ class CompassWidget(QWidget):
             rad = math.radians(self.target - 90)
             x = cx + int((r - 30) * math.cos(rad))
             y = cy + int((r - 30) * math.sin(rad))
-            painter.setPen(QPen(QColor("#f38ba8"), 2, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor("#f38ba8"), 2, Qt.DashLine))
             painter.drawLine(cx, cy, x, y)
         rad = math.radians(self.azimuth - 90)
         tip_x = cx + int((r - 35) * math.cos(rad))
@@ -272,10 +274,10 @@ class CompassWidget(QWidget):
         painter.setPen(QPen(QColor("#a6e3a1"), 3))
         painter.drawLine(cx, cy, tip_x, tip_y)
         painter.setBrush(QBrush(QColor("#a6e3a1")))
-        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setPen(Qt.NoPen)
         painter.drawEllipse(cx - 5, cy - 5, 10, 10)
         painter.setPen(QPen(QColor("#cdd6f4")))
-        painter.setFont(QFont("Sans", 12, QFont.Weight.Bold))
+        painter.setFont(QFont("Sans", 12, QFont.Bold))
         painter.drawText(cx - 30, cy + r - 5, f"{self.azimuth:.0f} deg")
 
 
@@ -313,7 +315,7 @@ class SPETab(QWidget):
         self.btn_operate = QPushButton("STANDBY")
         self.btn_operate.setCheckable(True)
         self.btn_operate.setMinimumSize(130, 55)
-        self.btn_operate.setFont(QFont("Sans", 12, QFont.Weight.Bold))
+        self.btn_operate.setFont(QFont("Sans", 12, QFont.Bold))
         self.btn_operate.clicked.connect(self._toggle_operate)
         self.btn_operate.setEnabled(False)
         self.btn_operate.setStyleSheet(
@@ -322,7 +324,7 @@ class SPETab(QWidget):
 
         self.btn_tune = QPushButton("TUNE")
         self.btn_tune.setMinimumSize(130, 45)
-        self.btn_tune.setFont(QFont("Sans", 11, QFont.Weight.Bold))
+        self.btn_tune.setFont(QFont("Sans", 11, QFont.Bold))
         self.btn_tune.clicked.connect(self._send_tune)
         self.btn_tune.setEnabled(False)
         self.btn_tune.setStyleSheet(
@@ -331,7 +333,7 @@ class SPETab(QWidget):
 
         self.btn_power = QPushButton("POWER")
         self.btn_power.setMinimumSize(130, 45)
-        self.btn_power.setFont(QFont("Sans", 11, QFont.Weight.Bold))
+        self.btn_power.setFont(QFont("Sans", 11, QFont.Bold))
         self.btn_power.clicked.connect(self._send_power)
         self.btn_power.setEnabled(False)
         self.btn_power.setStyleSheet(
@@ -339,8 +341,8 @@ class SPETab(QWidget):
         btn_layout.addWidget(self.btn_power)
 
         self.tx_label = QLabel("RX")
-        self.tx_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.tx_label.setFont(QFont("Sans", 12, QFont.Weight.Bold))
+        self.tx_label.setAlignment(Qt.AlignCenter)
+        self.tx_label.setFont(QFont("Sans", 12, QFont.Bold))
         self.tx_label.setStyleSheet("color: #a6e3a1;")
         btn_layout.addWidget(self.tx_label)
         sl.addLayout(btn_layout)
@@ -348,17 +350,17 @@ class SPETab(QWidget):
         # Right column - meters
         meters = QFormLayout()
         self.band_label = QLabel("---")
-        self.band_label.setFont(QFont("Sans", 16, QFont.Weight.Bold))
+        self.band_label.setFont(QFont("Sans", 16, QFont.Bold))
         self.band_label.setStyleSheet("color: #89b4fa;")
         meters.addRow("Band:", self.band_label)
 
         self.power_label = QLabel("0 W")
-        self.power_label.setFont(QFont("Sans", 16, QFont.Weight.Bold))
+        self.power_label.setFont(QFont("Sans", 16, QFont.Bold))
         self.power_label.setStyleSheet("color: #a6e3a1;")
         meters.addRow("Output:", self.power_label)
 
         self.swr_label = QLabel("---")
-        self.swr_label.setFont(QFont("Sans", 16, QFont.Weight.Bold))
+        self.swr_label.setFont(QFont("Sans", 16, QFont.Bold))
         self.swr_label.setStyleSheet("color: #a6e3a1;")
         meters.addRow("SWR:", self.swr_label)
 
@@ -476,11 +478,48 @@ class SPETab(QWidget):
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
 
+class RotorUDPListener(QThread):
+    bearing_received = pyqtSignal(float)
+
+    def __init__(self, port):
+        super().__init__()
+        self.port = port
+        self._running = False
+
+    def run(self):
+        self._running = True
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('', self.port))
+                sock.settimeout(1.0)
+                while self._running:
+                    try:
+                        data, _ = sock.recvfrom(64)
+                        msg = data.decode('ascii', errors='ignore').strip()
+                        if msg.startswith('GOTO:'):
+                            bearing = float(msg[5:])
+                            self.bearing_received.emit(bearing)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Rotor UDP listener error: {e}")
+
+    def stop(self):
+        self._running = False
+
+
 class RotatorTab(QWidget):
     def __init__(self):
         super().__init__()
         self.rot_thread = None
         self._build_ui()
+        self.udp_listener = RotorUDPListener(ROTOR_UDP_PORT)
+        self.udp_listener.bearing_received.connect(self._on_remote_bearing)
+        self.udp_listener.start()
+        QTimer.singleShot(1000, self._connect)
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
@@ -508,9 +547,13 @@ class RotatorTab(QWidget):
         pos_grp = QGroupBox("Position")
         pl = QFormLayout(pos_grp)
         self.az_label = QLabel("---")
-        self.az_label.setFont(QFont("Sans", 20, QFont.Weight.Bold))
+        self.az_label.setFont(QFont("Sans", 20, QFont.Bold))
         self.az_label.setStyleSheet("color: #a6e3a1;")
         pl.addRow("Current:", self.az_label)
+        self.target_label = QLabel("---")
+        self.target_label.setFont(QFont("Sans", 16, QFont.Bold))
+        self.target_label.setStyleSheet("color: #f9e2af;")
+        pl.addRow("Moving to:", self.target_label)
         right.addWidget(pos_grp)
 
         ctrl_grp = QGroupBox("Control")
@@ -531,7 +574,7 @@ class RotatorTab(QWidget):
 
         btn_stop = QPushButton("STOP")
         btn_stop.setMinimumHeight(50)
-        btn_stop.setFont(QFont("Sans", 12, QFont.Weight.Bold))
+        btn_stop.setFont(QFont("Sans", 12, QFont.Bold))
         btn_stop.setStyleSheet(
             "background-color: #f38ba8; color: #1e1e2e; font-weight: bold;")
         btn_stop.clicked.connect(self._stop)
@@ -582,6 +625,7 @@ class RotatorTab(QWidget):
         self.conn_status.setStyleSheet("color: #f38ba8; font-size: 18px;")
         self.btn_connect.setChecked(False)
         self._log(f"Rotator disconnected: {reason}")
+        QTimer.singleShot(5000, self._connect)
 
     def _on_position(self, az):
         self.az_label.setText(f"{az:.0f} deg")
@@ -591,18 +635,29 @@ class RotatorTab(QWidget):
         if self.rot_thread:
             az = self.target_spin.value()
             self.compass.set_target(az)
+            self.target_label.setText(f"{az} deg")
             self.rot_thread.rotate_to(az)
 
     def _preset(self, bearing):
         self.target_spin.setValue(bearing)
         if self.rot_thread:
             self.compass.set_target(bearing)
+            self.target_label.setText(f"{bearing} deg")
             self.rot_thread.rotate_to(bearing)
 
     def _stop(self):
         if self.rot_thread:
             self.rot_thread.stop_rotation()
             self.compass.set_target(None)
+            self.target_label.setText("---")
+
+    def _on_remote_bearing(self, bearing):
+        self.target_spin.setValue(int(round(bearing)))
+        self.compass.set_target(bearing)
+        self.target_label.setText(f"{bearing:.0f} deg")
+        if self.rot_thread:
+            self.rot_thread.rotate_to(bearing)
+        self._log(f"Remote: rotating to {bearing:.0f}°")
 
     def _log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -669,6 +724,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.spe_tab.spe_thread: self.spe_tab.spe_thread.stop()
         if self.rot_tab.rot_thread: self.rot_tab.rot_thread.stop()
+        self.rot_tab.udp_listener.stop()
         super().closeEvent(event)
 
 

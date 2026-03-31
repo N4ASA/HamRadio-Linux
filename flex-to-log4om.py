@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import socket,threading,time,re,subprocess,sqlite3
+import socket,threading,time,re,subprocess,sqlite3,math
 import urllib.request,xml.etree.ElementTree as ET,json,os
 from datetime import datetime,timezone
 from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QFormLayout,QFrame,QSystemTrayIcon,QMenu,QInputDialog)
@@ -18,7 +18,7 @@ def load_config():
             break
     return config
 config=load_config()
-FLEX_HOST="127.0.0.1";FLEX_PORT=4992;RIGCTLD_PORT=4532
+FLEX_HOST="127.0.0.1";FLEX_PORT=4992;RIGCTLD_PORT=4532;ROTOR_UDP_PORT=12345
 MY_CALLSIGN=config.get("MY_CALLSIGN","N4ASA")
 MY_GRID=config.get("MY_GRID","FN43")
 MY_LAT=float(config.get("MY_LAT","44.0"))
@@ -35,7 +35,8 @@ QRZ_PASSWORD=config.get("QRZ_PASSWORD","")
 WORKED_COLOR=config.get("WORKED_COLOR","#00FF7F")
 current_freq=14100000;current_mode="USB"
 freq_lock=threading.Lock();spot_db={};spot_lock=threading.Lock()
-_spot_timer=None;_spot_timer_lock=threading.Lock()
+_spot_timer=None;_spot_timer_lock=threading.Lock();_dialog_open=False
+_shown_freq=None;_shown_freq_lock=threading.Lock()
 
 def schedule_spot_dialog(spots,freq_mhz,mode,dwell=2.0):
     global _spot_timer
@@ -193,10 +194,64 @@ def log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes=""):
         print(f"✗ Log error: {e}")
         import traceback;traceback.print_exc()
         return False
+def calc_bearing(lat1, lon1, lat2, lon2):
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlon = lon2 - lon1
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+def calc_distance_mi(lat1, lon1, lat2, lon2):
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1; dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    return 3959 * 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+def grid_to_latlon(grid):
+    """Convert Maidenhead grid square to (lat, lon) center point"""
+    try:
+        g=grid.upper().strip()
+        if len(g)<4: return 0.0,0.0
+        lon=(ord(g[0])-ord('A'))*20-180+int(g[2])*2
+        lat=(ord(g[1])-ord('A'))*10-90+int(g[3])
+        if len(g)>=6:
+            lon+=(ord(g[4])-ord('A'))*(5/60)+(5/120)
+            lat+=(ord(g[5])-ord('A'))*(2.5/60)+(2.5/120)
+        else:
+            lon+=1.0;lat+=0.5
+        return lat,lon
+    except Exception: return 0.0,0.0
+
+def send_rotor_bearing(bearing):
+    if not PI_IP: return
+    try:
+        msg = f"GOTO:{bearing:.1f}".encode()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(msg, (PI_IP, ROTOR_UDP_PORT))
+            s.sendto(msg, (PI_IP, 12346))
+        print(f"  Rotor → {bearing:.0f}°")
+    except Exception as e:
+        print(f"  Rotor UDP error: {e}")
+
 class QSODialog(QDialog):
     def __init__(self,callsign,freq_mhz,mode,qrz_data=None,parent=None):
         super().__init__(parent)
         self.callsign=callsign;self.freq_mhz=freq_mhz;self.mode=mode;self.qrz_data=qrz_data or {}
+        lat=float(self.qrz_data.get('lat',0) or 0)
+        lon=float(self.qrz_data.get('lon',0) or 0)
+        self.bearing_source=""
+        if lat and lon:
+            self.bearing_source="qrz"
+        else:
+            grid=self.qrz_data.get('grid','')
+            if grid:
+                lat,lon=grid_to_latlon(grid)
+                if lat and lon: self.bearing_source=f"grid:{grid[:4]}"
+        if lat and lon:
+            self.bearing=calc_bearing(MY_LAT,MY_LON,lat,lon)
+            self.distance_mi=calc_distance_mi(MY_LAT,MY_LON,lat,lon)
+        else:
+            self.bearing=None;self.distance_mi=None
         self.setWindowTitle("Log QSO?")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.Dialog)
         self.setMinimumWidth(400)
@@ -210,6 +265,9 @@ class QSODialog(QDialog):
             QLabel#callsign{color:#89b4fa;font-size:24px;font-weight:bold;}
             QLabel#freq{color:#f5c2e7;font-size:14px;}
             QLabel#info{color:#a6adc8;font-size:12px;}
+            QLabel#bearing{color:#f9e2af;font-size:13px;font-weight:bold;}
+            QPushButton#rotor{background:#f9e2af;color:#1e1e2e;border:none;border-radius:6px;padding:5px 16px;font-weight:bold;font-size:12px;}
+            QPushButton#rotor:hover{background:#f5c543;}
             QLineEdit{background:#313244;border:1px solid #45475a;border-radius:6px;padding:6px 10px;color:#cdd6f4;font-size:13px;}
             QLineEdit:focus{border:1px solid #89b4fa;}
             QPushButton#log{background:#a6e3a1;color:#1e1e2e;border:none;border-radius:8px;padding:10px 24px;font-weight:bold;font-size:14px;}
@@ -230,6 +288,11 @@ class QSODialog(QDialog):
         if name or country:
             parts=[p for p in [name,country,f"Grid:{grid}" if grid else "",f"CQ{cqzone}" if cqzone else ""] if p]
             il=QLabel("  •  ".join(parts));il.setObjectName("info");il.setAlignment(Qt.AlignmentFlag.AlignCenter);il.setWordWrap(True);layout.addWidget(il)
+        if self.bearing is not None:
+            src=f" ({self.bearing_source})" if self.bearing_source not in ("","qrz") else ""
+            bl=QLabel(f"Bearing: {self.bearing:.0f}°  •  {self.distance_mi:,.0f} mi{src}");bl.setObjectName("bearing");bl.setAlignment(Qt.AlignmentFlag.AlignCenter);layout.addWidget(bl)
+            if PI_IP:
+                rb=QPushButton(f"→ Point Rotor to {self.bearing:.0f}°");rb.setObjectName("rotor");rb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor));rb.clicked.connect(self._point_rotor);layout.addWidget(rb)
         self._div(layout)
         form=QFormLayout();form.setSpacing(8)
         self.rst_sent=QLineEdit("59");self.rst_rcvd=QLineEdit("59")
@@ -242,15 +305,18 @@ class QSODialog(QDialog):
         cb=QPushButton("Cancel");cb.setObjectName("cancel");cb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor));cb.clicked.connect(self.reject)
         lb=QPushButton("✓ Log QSO");lb.setObjectName("log");lb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor));lb.clicked.connect(self.accept);lb.setDefault(True)
         btn.addWidget(cb);btn.addWidget(lb);layout.addLayout(btn)
-        self.countdown=60;self.timer=QTimer();self.timer.timeout.connect(self.tick);self.timer.start(1000);self.update_title()
+        self.setWindowTitle("Log QSO?")
+        self._freq_timer=QTimer();self._freq_timer.timeout.connect(self._check_still_on_freq);self._freq_timer.start(500)
     def _div(self,layout):
         d=QFrame();d.setObjectName("divider");d.setFrameShape(QFrame.Shape.HLine);d.setFixedHeight(1);layout.addWidget(d)
-    def tick(self):
-        self.countdown-=1
-        if self.countdown<=0: self.reject()
-        else: self.update_title()
-    def update_title(self): self.setWindowTitle(f"Log QSO? ({self.countdown}s)")
     def get_values(self): return self.rst_sent.text() or "59",self.rst_rcvd.text() or "59",self.notes.text()
+    def _check_still_on_freq(self):
+        with freq_lock: cf_mhz=current_freq/1e6
+        if abs(cf_mhz-self.freq_mhz)>=0.005:
+            print(f"  VFO moved away ({cf_mhz:.3f} vs {self.freq_mhz:.3f}) — closing dialog")
+            self.reject()
+    def _point_rotor(self):
+        threading.Thread(target=send_rotor_bearing,args=(self.bearing,),daemon=True).start()
 class SpotSignal(QObject):
     spot_clicked=pyqtSignal(str,float,str,dict)
     multi_spot=pyqtSignal(list,float,str)
@@ -259,6 +325,7 @@ class SpotPickerDialog(QDialog):
     def __init__(self,spots,freq_mhz,parent=None):
         super().__init__(parent)
         self.selected=None
+        self.freq_mhz=freq_mhz
         self.setWindowTitle("Multiple Spots Found")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.Dialog)
         self.setMinimumWidth(350)
@@ -286,17 +353,34 @@ class SpotPickerDialog(QDialog):
             layout.addWidget(btn)
         d2=QFrame(); d2.setFrameShape(QFrame.Shape.HLine); d2.setStyleSheet("background:#45475a;"); d2.setFixedHeight(1); layout.addWidget(d2)
         cb=QPushButton("Cancel"); cb.setObjectName("cancel"); cb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor)); cb.clicked.connect(self.reject); layout.addWidget(cb)
+        self._freq_timer=QTimer(); self._freq_timer.timeout.connect(self._check_still_on_freq); self._freq_timer.start(500)
+
+    def _check_still_on_freq(self):
+        with freq_lock: cf_mhz=current_freq/1e6
+        if abs(cf_mhz-self.freq_mhz)>=0.005:
+            print(f"  VFO moved away ({cf_mhz:.3f} vs {self.freq_mhz:.3f}) — closing picker")
+            self.reject()
 
     def _pick(self,spot):
         self.selected=spot
         self.accept()
 
 def show_qso_dialog(callsign,freq_mhz,mode,qrz_data):
-    dialog=QSODialog(callsign,freq_mhz,mode,qrz_data)
-    if dialog.exec()==QDialog.DialogCode.Accepted:
-        rst_sent,rst_rcvd,notes=dialog.get_values()
-        log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes)
-    else: print("  QSO cancelled")
+    global _dialog_open,_shown_freq
+    if _dialog_open: print("  Dialog already open, skipping"); return
+    _dialog_open=True
+    with _spot_timer_lock:
+        if _spot_timer is not None: _spot_timer.cancel()
+    with _shown_freq_lock: _shown_freq=freq_mhz
+    try:
+        dialog=QSODialog(callsign,freq_mhz,mode,qrz_data)
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            rst_sent,rst_rcvd,notes=dialog.get_values()
+            log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes)
+        else: print("  QSO cancelled")
+    finally:
+        _dialog_open=False
+        with _shown_freq_lock: _shown_freq=None
 def handle_rigctld_client(conn,addr):
     try:
         buf=""
@@ -347,15 +431,25 @@ def pick_and_emit(spots,freq_mhz,mode):
 
 def show_spot_picker(spots,freq_mhz,mode):
     """Called on main thread - show picker dialog"""
-    picker=SpotPickerDialog(spots,freq_mhz)
-    if picker.exec()==QDialog.DialogCode.Accepted and picker.selected:
-        sf,info=picker.selected
-        callsign=info['callsign']
-        threading.Thread(target=lookup_and_emit,args=(callsign,sf,mode),daemon=True).start()
-    else:
-        print("  Spot selection cancelled")
+    global _dialog_open,_shown_freq
+    if _dialog_open: print("  Dialog already open, skipping"); return
+    _dialog_open=True
+    with _spot_timer_lock:
+        if _spot_timer is not None: _spot_timer.cancel()
+    with _shown_freq_lock: _shown_freq=freq_mhz
+    try:
+        picker=SpotPickerDialog(spots,freq_mhz)
+        if picker.exec()==QDialog.DialogCode.Accepted and picker.selected:
+            sf,info=picker.selected
+            callsign=info['callsign']
+            threading.Thread(target=lookup_and_emit,args=(callsign,sf,mode),daemon=True).start()
+        else:
+            print("  Spot selection cancelled")
+    finally:
+        _dialog_open=False
+        with _shown_freq_lock: _shown_freq=None
 def monitor_flex():
-    global current_freq,current_mode
+    global current_freq,current_mode,_shown_freq
     print("Connecting to Flex 8400...")
     while True:
         try:
@@ -387,7 +481,7 @@ def monitor_flex():
                             fm=re.search(r'RF_frequency=(\d+\.\d+)',line)
                             mm=re.search(r'mode=(\w+)',line)
                             if fm:
-                                new_freq_mhz=float(fm.group(1));new_freq_hz=int(new_freq_mhz*1e6)
+                                new_freq_mhz=float(fm.group(1));new_freq_hz=round(new_freq_mhz*1e6/100)*100
                                 new_mode=mm.group(1) if mm else "USB"
                                 with freq_lock:
                                     changed=(new_freq_hz!=current_freq)
@@ -395,10 +489,16 @@ def monitor_flex():
                                 if changed:
                                     spots=find_spots(new_freq_mhz)
                                     mode=MODE_MAP.get(new_mode,new_mode)
+                                    with _shown_freq_lock: sf=_shown_freq
+                                    if sf is not None and abs(new_freq_mhz-sf)>=0.003:
+                                        with _shown_freq_lock: _shown_freq=None; sf=None
                                     if spots:
-                                        names=",".join([s[1]['callsign'] for s in spots])
-                                        print(f"\n✓ {new_freq_mhz:.3f} MHz {new_mode} → {names}")
-                                        schedule_spot_dialog(spots,new_freq_mhz,mode)
+                                        if sf is not None and abs(new_freq_mhz-sf)<0.003:
+                                            pass  # already showed dialog here, wait for VFO to move away
+                                        else:
+                                            names=",".join([s[1]['callsign'] for s in spots])
+                                            print(f"\n✓ {new_freq_mhz:.3f} MHz {new_mode} → {names}")
+                                            schedule_spot_dialog(spots,new_freq_mhz,mode)
                                     else:
                                         with _spot_timer_lock:
                                             if _spot_timer is not None: _spot_timer.cancel()

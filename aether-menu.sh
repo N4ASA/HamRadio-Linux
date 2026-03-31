@@ -4,20 +4,18 @@
 FLEX_IP="192.168.1.29"
 PI_IP="100.76.124.28"
 PI_WEB="http://${PI_IP}:5000"
-AETHER_0710="$HOME/apps/aethersdr-new/AetherSDR-v0.7.10-x86_64.AppImage"
+AETHER_0716="$HOME/apps/aethersdr-new/AetherSDR-v0.7.16-x86_64.AppImage"
 AETHER_0711="$HOME/apps/aethersdr-new/AetherSDR-v0.7.11-x86_64.AppImage"
-AETHER_072="$HOME/apps/aethersdr-new/AetherSDR-v0.7.2-x86_64.AppImage"
 FLEXSPOTS="$HOME/hamradio-linux/flexspots.py"
-BRIDGE="$HOME/flex-to-log4om.py"
+BRIDGE="$HOME/hamradio-linux/flex-to-log4om.py"
 
 CHOICES=$(zenity --list --checklist \
   --title="Ham Radio Control Center" \
   --text="Select programs to launch:" \
   --column="Pick" --column="Program" \
   FALSE "🚀 Full Station Startup" \
+  FALSE "📡 AetherSDR v0.7.16" \
   FALSE "📡 AetherSDR v0.7.11" \
-  FALSE "📡 AetherSDR v0.7.10" \
-  FALSE "📡 AetherSDR v0.7.2" \
   FALSE "🎯 FlexSpots for Linux" \
   FALSE "📝 Flex to Log4OM Bridge" \
   FALSE "📋 CQRLOG" \
@@ -48,6 +46,16 @@ hand_to_windows() {
   curl -s -X POST "${PI_WEB}/windows" >/dev/null 2>&1 || true
 }
 
+# ─── Helper: open PI_WEB in a dedicated new browser window ───────────────────
+open_pi_web() {
+  firefox --no-remote --private-window "${PI_WEB}" &
+}
+
+close_pi_web() {
+  pkill -f "firefox.*no-remote" 2>/dev/null
+  sleep 0.5
+}
+
 # ─── Full Station Startup ─────────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
@@ -60,14 +68,26 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
     sleep 1
   fi
 
-  if ! pgrep -f AetherSDR-v0.7.11 > /dev/null; then
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0711" \
-    "$AETHER_0711" >/dev/null 2>&1 &
+  if ! pgrep -f AetherSDR-v0.7.16 > /dev/null; then
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0716" \
+    "$AETHER_0716" >/dev/null 2>&1 &
   fi
 
-  xdg-open "${PI_WEB}" 2>/dev/null &
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.11\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
+  close_pi_web
+  sleep 0.5
+  open_pi_web
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.7.16\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
   exit 0
+fi
+
+# ─── AetherSDR v0.7.16 ───────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "AetherSDR v0.7.16"; then
+  if pgrep -f AetherSDR-v0.7.16 > /dev/null; then
+    wmctrl -x -a AetherSDR-v0.7.16-x86_64.AppImage.AetherSDR 2>/dev/null
+  else
+    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0716" \
+    "$AETHER_0716" >/dev/null 2>&1 &
+  fi
 fi
 
 # ─── AetherSDR v0.7.11 ───────────────────────────────────────────────────────
@@ -77,26 +97,6 @@ if echo "$CHOICES" | grep -q "AetherSDR v0.7.11"; then
   else
     nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0711" \
     "$AETHER_0711" >/dev/null 2>&1 &
-  fi
-fi
-
-# ─── AetherSDR v0.7.10 ───────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.7.10"; then
-  if pgrep -f AetherSDR-v0.7.10 > /dev/null; then
-    wmctrl -x -a AetherSDR-v0.7.10-x86_64.AppImage.AetherSDR 2>/dev/null
-  else
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0710" \
-    "$AETHER_0710" >/dev/null 2>&1 &
-  fi
-fi
-
-# ─── AetherSDR v0.7.2 ────────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.7.2"; then
-  if pgrep -f AetherSDR-v0.7.2 > /dev/null; then
-    wmctrl -x -a AetherSDR-v0.7.2-x86_64.AppImage.AetherSDR 2>/dev/null
-  else
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-072" \
-    "$AETHER_072" >/dev/null 2>&1 &
   fi
 fi
 
@@ -153,7 +153,7 @@ fi
 
 # ─── Web Amp/Rotor Control ───────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Web Amp/Rotor Control"; then
-  xdg-open "${PI_WEB}" 2>/dev/null &
+  open_pi_web
 fi
 
 # ─── Shut Down All ───────────────────────────────────────────────────────────
@@ -168,6 +168,9 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
   hand_to_windows
   sleep 1
 
+  # Close Ham Radio Remote Control browser tab before killing app.py (title changes on disconnect)
+  close_pi_web
+
   # Stop app.py on Pi
   ssh -i ~/.ssh/ham_radio pi@${PI_IP} "pkill -f app.py" 2>/dev/null
 
@@ -178,9 +181,6 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
   pkill -f cqrlog_qrz.py    2>/dev/null
   pkill -x cqrlog           2>/dev/null
   pkill -f launch-hamradio  2>/dev/null
-
-  # Close Ham Radio Remote Control browser tab
-  wmctrl -c "Ham Radio Remote Control" 2>/dev/null
 
   # Stop SSH tunnel last
   sleep 1
