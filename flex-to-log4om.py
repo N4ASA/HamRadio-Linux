@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import socket,threading,time,re,subprocess,sqlite3,math
-import urllib.request,xml.etree.ElementTree as ET,json,os
+import urllib.request,xml.etree.ElementTree as ET,json,os,requests
 from datetime import datetime,timezone
 from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QFormLayout,QFrame,QSystemTrayIcon,QMenu,QInputDialog)
 from PyQt6.QtCore import Qt,QTimer,pyqtSignal,QObject
@@ -149,6 +149,44 @@ def change_spot_color(callsign, color=WORKED_COLOR):
 
 def generate_qsoid():
     now=datetime.now(); return now.strftime("%Y%m%d%H%M%S")+str(now.microsecond)[:3]
+QRZ_API_URL="https://logbook.qrz.com/api"
+QRZ_CONFIG_FILE=os.path.expanduser("~/.config/cqrlog-qrz/config.json")
+
+def get_qrz_api_key():
+    try:
+        with open(QRZ_CONFIG_FILE) as f:
+            return json.load(f).get("qrz_api_key","")
+    except Exception:
+        return ""
+
+def upload_qso_to_qrz(callsign,freq_mhz,band,mode,now_utc,rst_sent,rst_rcvd,name,country,gridsq,qth,notes):
+    api_key=get_qrz_api_key()
+    if not api_key:
+        print("  QRZ upload skipped: no API key")
+        return
+    def field(tag,value):
+        value=str(value).strip() if value else ""
+        return f"<{tag}:{len(value)}>{value} " if value else ""
+    qso_date=now_utc[:10].replace("-","")
+    time_on=now_utc[11:19].replace(":","")
+    freq_mhz_str=f"{freq_mhz:.6f}"
+    adif=(field("CALL",callsign)+field("BAND",band)+field("MODE",mode)+
+          field("QSO_DATE",qso_date)+field("TIME_ON",time_on)+
+          field("FREQ",freq_mhz_str)+field("RST_SENT",rst_sent)+field("RST_RCVD",rst_rcvd)+
+          field("NAME",name)+field("QTH",qth)+field("GRIDSQUARE",gridsq)+
+          field("COUNTRY",country)+field("COMMENT",notes)+"<EOR>")
+    try:
+        resp=requests.post(QRZ_API_URL,data={"KEY":api_key,"ACTION":"INSERT","ADIF":adif},timeout=15)
+        resp.raise_for_status()
+        if "STATUS=OK" in resp.text or "RESULT=OK" in resp.text:
+            logid=next((p.split("=",1)[1] for p in resp.text.replace("&","\n").splitlines() if p.startswith("LOGID=")),"-")
+            print(f"  ✓ QRZ upload OK (LOGID={logid})")
+        else:
+            reason=next((p.split("=",1)[1] for p in resp.text.replace("&","\n").splitlines() if p.startswith("REASON=")),"")
+            print(f"  ✗ QRZ upload failed: {reason or resp.text[:120]}")
+    except Exception as e:
+        print(f"  ✗ QRZ upload error: {e}")
+
 def log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes=""):
     try:
         band=freq_to_band(freq_mhz);freq_khz=freq_mhz*1000
@@ -186,6 +224,7 @@ def log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes=""):
          "FlexSpotsLinux","1.0",1,sunspots))
         conn.commit();conn.close()
         print(f"✓ Logged: {callsign} {freq_mhz:.3f} MHz {mode} {band}")
+        threading.Thread(target=upload_qso_to_qrz,args=(callsign,freq_mhz,band,mode,now_utc,rst_sent,rst_rcvd,name,country,gridsq,qth,notes),daemon=True).start()
         subprocess.Popen([RCLONE_PATH,"copy",DB_LOCAL,"Google_Drive:Log4OM/"])
         print("✓ Syncing to Google Drive...")
         threading.Thread(target=change_spot_color,args=(callsign,),daemon=True).start()
@@ -417,6 +456,17 @@ def start_rigctld_server():
             conn,addr=s.accept()
             threading.Thread(target=handle_rigctld_client,args=(conn,addr),daemon=True).start()
         except: pass
+def set_flex_freq(freq_mhz):
+    try:
+        s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        s.settimeout(3);s.connect((FLEX_HOST,FLEX_PORT));time.sleep(0.2)
+        try: s.recv(65536)
+        except: pass
+        s.send(f"C1|slice tune 0 {freq_mhz:.6f} autopan=1\n".encode())
+        time.sleep(0.1);s.close()
+        print(f"  Tuned VFO to {freq_mhz:.3f} MHz")
+    except Exception as e: print(f"  set_flex_freq failed: {e}")
+
 def lookup_and_emit(callsign,freq_mhz,mode):
     qrz_data=qrz_lookup(callsign)
     spot_signal.spot_clicked.emit(callsign,freq_mhz,mode,qrz_data)
@@ -442,6 +492,7 @@ def show_spot_picker(spots,freq_mhz,mode):
         if picker.exec()==QDialog.DialogCode.Accepted and picker.selected:
             sf,info=picker.selected
             callsign=info['callsign']
+            threading.Thread(target=set_flex_freq,args=(sf,),daemon=True).start()
             threading.Thread(target=lookup_and_emit,args=(callsign,sf,mode),daemon=True).start()
         else:
             print("  Spot selection cancelled")
