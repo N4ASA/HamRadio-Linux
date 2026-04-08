@@ -125,7 +125,7 @@ if echo "$CHOICES" | grep -q "Startup (CQRLOG & QRZ Uploader)"; then
   if pgrep -f launch-hamradio.sh > /dev/null; then
     wmctrl -a CQRLOG 2>/dev/null
   else
-    /home/dparker100/launch-hamradio.sh &
+    "$HOME/hamradio-linux/launch-hamradio.sh" &
   fi
 fi
 
