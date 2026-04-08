@@ -46,8 +46,10 @@ def _udp_target_listener():
                 msg = data.decode('ascii', errors='ignore').strip()
                 if msg.startswith('GOTO:'):
                     global _target_az
+                    az = float(msg[5:])
                     with _target_lock:
-                        _target_az = float(msg[5:])
+                        _target_az = az
+                    threading.Thread(target=rotate_to, args=(az,), daemon=True).start()
             except Exception:
                 pass
 
@@ -1052,12 +1054,38 @@ def linux():
     auth = require_login()
     if auth:
         return auth
-    subprocess.run(["sudo", "systemctl", "stop", "virtualhere"])
+    import glob as _glob
     import time as _time
-    _time.sleep(1)
-    subprocess.run(["sudo", "modprobe", "-r", "ftdi_sio"])
+
+    subprocess.run(["sudo", "systemctl", "stop", "virtualhere"])
     _time.sleep(2)
-    subprocess.run(["sudo", "modprobe", "ftdi_sio"])
+
+    ftdi_driver = "/sys/bus/usb/drivers/ftdi_sio"
+
+    # Find all FTDI USB devices (vendor 0403) connected to the Pi
+    ftdi_ifaces = []
+    for vendor_file in _glob.glob("/sys/bus/usb/devices/*/idVendor"):
+        try:
+            with open(vendor_file) as f:
+                if f.read().strip() == "0403":
+                    dev_name = os.path.basename(os.path.dirname(vendor_file))
+                    ftdi_ifaces.append(f"{dev_name}:1.0")
+        except Exception:
+            pass
+
+    # Unbind any currently bound FTDI interfaces
+    for iface in ftdi_ifaces:
+        if os.path.exists(f"{ftdi_driver}/{iface}"):
+            subprocess.run(["sudo", "tee", f"{ftdi_driver}/unbind"],
+                           input=iface, text=True, capture_output=True)
+
+    _time.sleep(1)
+
+    # Rebind all FTDI interfaces to the driver
+    for iface in ftdi_ifaces:
+        subprocess.run(["sudo", "tee", f"{ftdi_driver}/bind"],
+                       input=iface, text=True, capture_output=True)
+
     return ("", 204)
 
 @app.route("/windows", methods=["POST"])

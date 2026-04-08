@@ -4,7 +4,7 @@
 FLEX_IP="192.168.1.29"
 PI_IP="100.76.124.28"
 PI_WEB="http://${PI_IP}:5000"
-AETHER_0820="$HOME/apps/aethersdr-new/AetherSDR-v0.8.2-x86_64.AppImage"
+AETHER_0820="$HOME/apps/aethersdr-new/AetherSDR-v0.8.6-x86_64.AppImage"
 
 FLEXSPOTS="$HOME/hamradio-linux/flexspots.py"
 BRIDGE="$HOME/hamradio-linux/flex-to-log4om.py"
@@ -14,7 +14,7 @@ CHOICES=$(zenity --list --checklist \
   --text="Select programs to launch:" \
   --column="Pick" --column="Program" \
   FALSE "🚀 Full Station Startup" \
-  FALSE "📡 AetherSDR v0.8.2" \
+  FALSE "📡 AetherSDR v0.8.6" \
   FALSE "🎯 FlexSpots for Linux" \
   FALSE "📝 Flex to Log4OM Bridge" \
   FALSE "📋 CQRLOG" \
@@ -67,7 +67,7 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
     sleep 1
   fi
 
-  if ! pgrep -f AetherSDR-v0.8.2 > /dev/null; then
+  if ! pgrep -f AetherSDR-v0.8.6 > /dev/null; then
     nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0820" \
     "$AETHER_0820" >/dev/null 2>&1 &
   fi
@@ -75,14 +75,14 @@ if echo "$CHOICES" | grep -q "Full Station Startup"; then
   close_pi_web
   sleep 0.5
   open_pi_web
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.8.2\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.8.6\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
   exit 0
 fi
 
-# ─── AetherSDR v0.8.2 ────────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.8.2"; then
-  if pgrep -f AetherSDR-v0.8.2 > /dev/null; then
-    wmctrl -x -a AetherSDR-v0.8.2-x86_64.AppImage.AetherSDR 2>/dev/null
+# ─── AetherSDR v0.8.6 ────────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "AetherSDR v0.8.6"; then
+  if pgrep -f AetherSDR-v0.8.6 > /dev/null; then
+    wmctrl -x -a AetherSDR-v0.8.6-x86_64.AppImage.AetherSDR 2>/dev/null
   else
     nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0820" \
     "$AETHER_0820" >/dev/null 2>&1 &

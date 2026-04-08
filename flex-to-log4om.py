@@ -37,6 +37,7 @@ current_freq=14100000;current_mode="USB"
 freq_lock=threading.Lock();spot_db={};spot_lock=threading.Lock()
 _spot_timer=None;_spot_timer_lock=threading.Lock();_dialog_open=False
 _shown_freq=None;_shown_freq_lock=threading.Lock()
+_flex_sock=None;_flex_sock_lock=threading.Lock();_flex_seq=4
 
 def schedule_spot_dialog(spots,freq_mhz,mode,dwell=2.0):
     global _spot_timer
@@ -295,6 +296,7 @@ class QSODialog(QDialog):
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.Dialog)
         self.setMinimumWidth(400)
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.move(222, 464)
         self.setup_ui()
     def setup_ui(self):
         self.setStyleSheet("""
@@ -355,6 +357,7 @@ class QSODialog(QDialog):
             print(f"  VFO moved away ({cf_mhz:.3f} vs {self.freq_mhz:.3f}) — closing dialog")
             self.reject()
     def _point_rotor(self):
+        print(f"  _point_rotor called, bearing={self.bearing}, PI_IP={PI_IP!r}")
         threading.Thread(target=send_rotor_bearing,args=(self.bearing,),daemon=True).start()
 class SpotSignal(QObject):
     spot_clicked=pyqtSignal(str,float,str,dict)
@@ -369,6 +372,7 @@ class SpotPickerDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.Dialog)
         self.setMinimumWidth(350)
         self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.move(222, 464)
         for child in self.findChildren(QPushButton):
             child.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet("""
@@ -411,9 +415,13 @@ def show_qso_dialog(callsign,freq_mhz,mode,qrz_data):
     with _spot_timer_lock:
         if _spot_timer is not None: _spot_timer.cancel()
     with _shown_freq_lock: _shown_freq=freq_mhz
+    threading.Thread(target=set_flex_freq,args=(freq_mhz,),daemon=True).start()
     try:
         dialog=QSODialog(callsign,freq_mhz,mode,qrz_data)
-        if dialog.exec()==QDialog.DialogCode.Accepted:
+        print(f"  Dialog created for {callsign}, calling exec()")
+        result=dialog.exec()
+        print(f"  Dialog exec() returned: {result}")
+        if result==QDialog.DialogCode.Accepted:
             rst_sent,rst_rcvd,notes=dialog.get_values()
             log_qso(callsign,freq_mhz,mode,rst_sent,rst_rcvd,notes)
         else: print("  QSO cancelled")
@@ -457,15 +465,17 @@ def start_rigctld_server():
             threading.Thread(target=handle_rigctld_client,args=(conn,addr),daemon=True).start()
         except: pass
 def set_flex_freq(freq_mhz):
-    try:
-        s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        s.settimeout(3);s.connect((FLEX_HOST,FLEX_PORT));time.sleep(0.2)
-        try: s.recv(65536)
-        except: pass
-        s.send(f"C1|slice tune 0 {freq_mhz:.6f} autopan=1\n".encode())
-        time.sleep(0.1);s.close()
-        print(f"  Tuned VFO to {freq_mhz:.3f} MHz")
-    except Exception as e: print(f"  set_flex_freq failed: {e}")
+    global _flex_seq
+    with _flex_sock_lock:
+        if _flex_sock is None:
+            print(f"  set_flex_freq: no socket"); return
+        try:
+            cmd=f"C{_flex_seq}|slice tune 0 {freq_mhz:.6f} autopan=1\n"
+            _flex_seq+=1
+            _flex_sock.sendall(cmd.encode())
+            print(f"  Tuned VFO to {freq_mhz:.3f} MHz")
+        except Exception as e:
+            print(f"  set_flex_freq failed: {e}")
 
 def lookup_and_emit(callsign,freq_mhz,mode):
     qrz_data=qrz_lookup(callsign)
@@ -474,8 +484,9 @@ def lookup_and_emit(callsign,freq_mhz,mode):
 def pick_and_emit(spots,freq_mhz,mode):
     """Emit signal to show picker on main thread"""
     if len(spots)==1:
-        callsign=spots[0][1]['callsign']
-        threading.Thread(target=lookup_and_emit,args=(callsign,freq_mhz,mode),daemon=True).start()
+        sf,info=spots[0]; callsign=info['callsign']
+        threading.Thread(target=set_flex_freq,args=(sf,),daemon=True).start()
+        threading.Thread(target=lookup_and_emit,args=(callsign,sf,mode),daemon=True).start()
         return
     spot_signal.multi_spot.emit(spots,freq_mhz,mode)
 
@@ -500,7 +511,7 @@ def show_spot_picker(spots,freq_mhz,mode):
         _dialog_open=False
         with _shown_freq_lock: _shown_freq=None
 def monitor_flex():
-    global current_freq,current_mode,_shown_freq
+    global current_freq,current_mode,_shown_freq,_flex_sock
     print("Connecting to Flex 8400...")
     while True:
         try:
@@ -515,6 +526,7 @@ def monitor_flex():
             s.send(b'C3|sub spot all\n');time.sleep(0.5)
             try: s.recv(65536)
             except: pass
+            with _flex_sock_lock: _flex_sock=s
             print("Monitoring frequency + spots...")
             buf=""
             while True:
@@ -522,12 +534,15 @@ def monitor_flex():
                     chunk=s.recv(4096).decode(errors='ignore');buf+=chunk
                     while '\n' in buf:
                         line,buf=buf.split('\n',1);line=line.strip()
+                        if '|spot ' in line and 'removed' not in line:
+                            print(f"  RAW SPOT: {line[:120]}")
                         if '|spot ' in line and 'callsign=' in line and 'removed' not in line:
                             cs=re.search(r'callsign=(\S+)',line)
                             rf=re.search(r'rx_freq=(\d+\.\d+)',line)
                             mm=re.search(r'mode=(\w+)',line)
                             if cs and rf:
                                 with spot_lock: spot_db[float(rf.group(1))]={'callsign':cs.group(1),'mode':mm.group(1) if mm else 'USB'}
+                                print(f"  Spot: {cs.group(1)} @ {float(rf.group(1)):.3f} MHz")
                         if 'slice' in line and 'RF_frequency' in line:
                             fm=re.search(r'RF_frequency=(\d+\.\d+)',line)
                             mm=re.search(r'mode=(\w+)',line)
@@ -556,8 +571,10 @@ def monitor_flex():
                                         print(f"\n  {new_freq_mhz:.3f} MHz {new_mode} (no spot)")
                 except socket.timeout: continue
                 except Exception as e: print(f"Flex lost: {e}"); break
+            with _flex_sock_lock: _flex_sock=None
             s.close()
         except Exception as e: print(f"Flex failed: {e}")
+        with _flex_sock_lock: _flex_sock=None
         print("Reconnecting in 5s...");time.sleep(5)
 if __name__=="__main__":
     print("=== Flex 8400 → Log4OM Bridge ===\n")
