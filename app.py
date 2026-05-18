@@ -5,6 +5,7 @@ import time
 import os
 import json
 import threading
+import queue as _queue
 
 app = Flask(__name__)
 
@@ -24,10 +25,10 @@ USERNAME = os.getenv("HAM_USERNAME", "dparker100")
 PASSWORD = os.getenv("HAM_PASSWORD", "changeme")
 app.secret_key = os.getenv("HAM_SECRET_KEY", "fallback-secret")
 
-ROT_PORT = "/dev/serial/by-id/usb-FTDI_FT230X_Basic_UART_D3078XXG-if00-port0"
+ROT_PORT = "/dev/rotor"
 ROT_BAUD = 9600
 
-SPE_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AI040U5P-if00-port0"
+SPE_PORT = "/dev/spe_amp"
 SPE_BAUD = 9600
 
 ROTOR_TARGET_UDP_PORT = 12346
@@ -67,13 +68,9 @@ def require_login():
 
 # ----------- HARDWARE AVAILABILITY -----------
 def check_port_available(port, baud):
-    """Try to open a serial port; return True if successful."""
-    try:
-        ser = serial.Serial(port, baud, timeout=1)
-        ser.close()
-        return True
-    except Exception:
-        return False
+    """Check if serial port device exists without opening it."""
+    import os
+    return os.path.exists(port)
 
 def get_hardware_availability():
     if vh_status() == "WINDOWS CONTROL":
@@ -85,24 +82,51 @@ def get_hardware_availability():
 
 
 # ----------- HARDWARE STATUS -----------
+_rot_az = None
+_rot_az_lock = threading.Lock()
+_rot_cmd_queue = _queue.Queue()
+
+def _rot_monitor():
+    global _rot_az
+    while True:
+        try:
+            ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
+            time.sleep(0.25)
+            while True:
+                try:
+                    while not _rot_cmd_queue.empty():
+                        try:
+                            cmd = _rot_cmd_queue.get_nowait()
+                            ser.write(cmd)
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+                    ser.write(b"C2\r\n")
+                    time.sleep(0.35)
+                    response = ser.read(20).decode(errors="ignore")
+                    if "+" in response:
+                        idx = response.index("+")
+                        az = response[idx + 1:idx + 5].strip()
+                        with _rot_az_lock:
+                            _rot_az = az if az else "---"
+                    time.sleep(0.5)
+                except Exception:
+                    break
+        except Exception:
+            with _rot_az_lock:
+                _rot_az = "ERR"
+            time.sleep(3)
+
+threading.Thread(target=_rot_monitor, daemon=True).start()
+
 def get_rotator_position():
-    try:
-        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
-        time.sleep(0.25)
-        ser.write(b"C2\r\n")
-        time.sleep(0.25)
-        response = ser.read(20).decode(errors="ignore")
-        ser.close()
-        if "+" in response:
-            idx = response.index("+")
-            az = response[idx + 1:idx + 5].strip()
-            return az if az else "---"
-    except Exception:
-        return "ERR"
-    return "---"
+    with _rot_az_lock:
+        return _rot_az if _rot_az is not None else "---"
+
 
 
 _spe_state = None
+_spe_cmd_queue = _queue.Queue()
 _spe_state_lock = threading.Lock()
 _SPE_FAILURE = {
     "operate": "---", "tx": "---", "band": "---", "power": "---",
@@ -110,19 +134,21 @@ _SPE_FAILURE = {
 }
 
 def _parse_spe(data):
+    # Full packet: C,15K,{operate},{tx},A,1,{band},1a,0r,{power},{fwdW_int},{swr},{ref},{?},{?},{temp},{?},{?},{warn},{alarm},{cksum}
     text = data.decode("ascii", errors="ignore")
     idx = text.find("C,")
     if idx == -1:
-        raise ValueError("No C, found")
-    parts = [p.strip() for p in text[idx:].strip().split(",")]
+        raise ValueError("No C, found in response")
+    line = text[idx:].split("\r")[0].split("\n")[0]
+    parts = [p.strip() for p in line.split(",")]
     band_map = {
         "00": "160m", "01": "80m", "02": "60m", "03": "40m",
         "04": "30m", "05": "20m", "06": "17m", "07": "15m",
         "08": "12m", "09": "10m", "10": "6m", "11": "4m"
     }
-    try: fwd_watts = str(int(parts[10].strip())) + "W" if len(parts) > 10 else "---"
+    try: fwd_watts = str(int(parts[10])) + "W" if len(parts) > 10 else "---"
     except Exception: fwd_watts = "---"
-    try: temp = str(int(float(parts[15].strip()))) if len(parts) > 15 else "---"
+    try: temp = str(int(float(parts[15]))) if len(parts) > 15 else "---"
     except Exception: temp = "---"
     return {
         "operate": "OPERATE" if parts[2] == "O" else "STANDBY",
@@ -130,40 +156,59 @@ def _parse_spe(data):
         "band": band_map.get(parts[6], parts[6] + "m"),
         "power": {"L": "LOW", "M": "MID", "H": "HIGH"}.get(parts[9], parts[9]),
         "fwd_watts": fwd_watts,
-        "swr": parts[11].strip() if len(parts) > 11 else "---",
+        "swr": parts[11] if len(parts) > 11 else "---",
         "temp": temp,
-        "warnings": parts[18].strip() if len(parts) > 18 else "N",
-        "alarms": parts[19].strip() if len(parts) > 19 else "N",
+        "warnings": parts[18] if len(parts) > 18 else "N",
+        "alarms": parts[19] if len(parts) > 19 else "N",
     }
 
 def _spe_monitor():
-    """Background thread: keeps serial port open and polls amp as fast as possible."""
     global _spe_state
-    consecutive_failures = 0
     while True:
         try:
-            ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=1)
-            time.sleep(0.25)
-            consecutive_failures = 0
+            ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=0.5)
+            time.sleep(1.0)
+            failures = 0
             while True:
                 try:
+                    # Send any queued commands with inter-command spacing
+                    cmd_sent = False
+                    while not _spe_cmd_queue.empty():
+                        try:
+                            cmd = _spe_cmd_queue.get_nowait()
+                            ser.write(cmd)
+                            cmd_sent = True
+                            time.sleep(0.3)  # gap between consecutive commands
+                        except Exception:
+                            pass
+                    if cmd_sent:
+                        time.sleep(0.8)          # let amp finish + ACK arrive
+                        ser.reset_input_buffer() # discard ACK + any auto-status
+                    # Poll: read lines until we find the C, status packet
                     ser.write(bytes([0x55, 0x55, 0x55, 0x01, 0x90, 0x90]))
-                    time.sleep(0.35)
-                    data = ser.read(200)
-                    result = _parse_spe(data)
+                    c_line = b""
+                    for _ in range(8):
+                        line = ser.readline()
+                        if b"C," in line:
+                            c_line = line
+                            break
+                    if not c_line:
+                        raise ValueError("No C, response")
+                    result = _parse_spe(c_line)
                     with _spe_state_lock:
                         _spe_state = result
-                    consecutive_failures = 0
-                    time.sleep(0.4)
+                    failures = 0
+                    time.sleep(0.3)
                 except Exception:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 3:
+                    failures += 1
+                    if failures >= 10:
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
-            with _spe_state_lock:
-                _spe_state = None
-            time.sleep(3)
+            pass
+        with _spe_state_lock:
+            _spe_state = None
+        time.sleep(2)
 
 threading.Thread(target=_spe_monitor, daemon=True).start()
 
@@ -912,35 +957,14 @@ evtSource.onerror = function() {
 
 
 def rotate_to(azimuth):
-    try:
-        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
-        time.sleep(0.25)
-        cmd = "M" + str(int(float(azimuth))).zfill(3) + "\r\n"
-        ser.write(cmd.encode())
-        time.sleep(0.25)
-        ser.close()
-    except Exception as e:
-        print(f"rotate_to error: {e}")
+    cmd = ("M" + str(int(float(azimuth))).zfill(3) + "\r\n").encode()
+    _rot_cmd_queue.put(cmd)
 
 def stop_rotator():
-    try:
-        ser = serial.Serial(ROT_PORT, ROT_BAUD, timeout=2)
-        time.sleep(0.25)
-        ser.write(b"S\r\n")
-        time.sleep(0.25)
-        ser.close()
-    except Exception as e:
-        print(f"stop_rotator error: {e}")
+    _rot_cmd_queue.put(b"S\r\n")
 
 def spe_send(cmd):
-    try:
-        ser = serial.Serial(SPE_PORT, SPE_BAUD, timeout=2)
-        time.sleep(0.25)
-        ser.write(cmd)
-        time.sleep(0.25)
-        ser.close()
-    except Exception as e:
-        print(f"spe_send error: {e}")
+    _spe_cmd_queue.put(cmd)
 
 # ----------- RENDER -----------
 def render_page(msg=""):
@@ -996,12 +1020,12 @@ def stream():
             try:
                 data = get_status_payload()
                 yield f"data: {json.dumps(data)}\n\n"
-                time.sleep(1)
+                time.sleep(.025)
             except GeneratorExit:
                 break
             except Exception:
                 yield f"data: {json.dumps({'error': 'status_error'})}\n\n"
-                time.sleep(1)
+                time.sleep(.025)
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

@@ -1,10 +1,13 @@
 #!/bin/bash
 
 # ─── Ham Radio Control Center ─────────────────────────────────────────────────
+# Set LOCAL_MODE=true when operating from Maine (no SSH tunnel needed)
+LOCAL_MODE=true
+
 FLEX_IP="192.168.1.29"
-PI_IP="100.76.124.28"
+PI_IP="192.168.1.38"
 PI_WEB="http://${PI_IP}:5000"
-AETHER_0820="$HOME/apps/aethersdr-new/AetherSDR-v0.8.6-x86_64.AppImage"
+AETHER="$HOME/Applications/AetherSDR.AppImage"
 
 FLEXSPOTS="$HOME/hamradio-linux/flexspots.py"
 BRIDGE="$HOME/hamradio-linux/flex-to-log4om.py"
@@ -14,7 +17,7 @@ CHOICES=$(zenity --list --checklist \
   --text="Select programs to launch:" \
   --column="Pick" --column="Program" \
   FALSE "🚀 Full Station Startup" \
-  FALSE "📡 AetherSDR v0.8.6" \
+  FALSE "📡 AetherSDR" \
   FALSE "🎯 FlexSpots for Linux" \
   FALSE "📝 Flex to Log4OM Bridge" \
   FALSE "📋 CQRLOG" \
@@ -28,6 +31,7 @@ CHOICES=$(zenity --list --checklist \
 
 # ─── Helper: ensure SSH tunnel is running ─────────────────────────────────────
 start_tunnel() {
+  $LOCAL_MODE && return  # No tunnel needed when operating locally
   if ! nc -z 127.0.0.1 4992 2>/dev/null; then
     ssh -f -i ~/.ssh/ham_radio -L 4992:${FLEX_IP}:4992 pi@${PI_IP} -N -o StrictHostKeyChecking=no
     sleep 2
@@ -37,6 +41,7 @@ start_tunnel() {
 
 # ─── Helper: stop SSH tunnel ──────────────────────────────────────────────────
 stop_tunnel() {
+  $LOCAL_MODE && return  # No tunnel to stop when operating locally
   pkill -f "ssh.*4992:${FLEX_IP}:4992" 2>/dev/null
 }
 
@@ -45,47 +50,54 @@ hand_to_windows() {
   curl -s -X POST "${PI_WEB}/windows" >/dev/null 2>&1 || true
 }
 
-# ─── Helper: open PI_WEB in a dedicated new browser window ───────────────────
+# ─── Helper: open PI_WEB in a browser window ─────────────────────────────────
 open_pi_web() {
-  firefox --no-remote --private-window "${PI_WEB}" &
+  google-chrome --new-window "${PI_WEB}" >/dev/null 2>&1 &
 }
 
 close_pi_web() {
-  pkill -f "firefox.*no-remote" 2>/dev/null
-  sleep 0.5
+  for wid in $(xdotool search --name "Ham Radio" 2>/dev/null); do
+    xdotool windowclose "$wid" 2>/dev/null
+  done
 }
 
 # ─── Full Station Startup ─────────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Full Station Startup"; then
   start_tunnel
 
-  ssh -i ~/.ssh/ham_radio pi@${PI_IP} \
-    "sudo systemctl stop virtualhere 2>/dev/null; sleep 1; pgrep -f app.py > /dev/null || nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
+  # Start Pi web control via systemd (reliable across SSH disconnect)
+  ssh -i ~/.ssh/ham_radio -o ConnectTimeout=5 -o BatchMode=yes pi@${PI_IP} \
+    "sudo systemctl stop virtualhere 2>/dev/null; sudo systemctl start ham-web-control" \
+    >/dev/null 2>&1
 
   if ! pgrep -f flex-to-log4om.py > /dev/null; then
     nohup python3 "$BRIDGE" >/dev/null 2>&1 &
-    sleep 1
   fi
 
-  if ! pgrep -f AetherSDR-v0.8.6 > /dev/null; then
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0820" \
-    "$AETHER_0820" >/dev/null 2>&1 &
+  if ! pgrep -f AetherSDR.AppImage > /dev/null; then
+    nohup "$AETHER" >/dev/null 2>&1 &
   fi
+
+  "$HOME/hamradio-linux/launch-hamradio.sh" &
+
+  # Wait until app.py is actually responding (up to 15 seconds)
+  for i in $(seq 1 15); do
+    if curl -s --max-time 1 "${PI_WEB}" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
 
   close_pi_web
-  sleep 0.5
   open_pi_web
-  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• SSH Tunnel\n• Flex to Log4OM Bridge\n• AetherSDR v0.8.6\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
+  zenity --info --text="✅ Full station startup complete!\n\nStarted:\n• Flex to Log4OM Bridge\n• AetherSDR\n• CQRLOG + QRZ Uploader\n• Web Amp/Rotor Control" --timeout=4 2>/dev/null &
   exit 0
 fi
 
-# ─── AetherSDR v0.8.6 ────────────────────────────────────────────────────────
-if echo "$CHOICES" | grep -q "AetherSDR v0.8.6"; then
-  if pgrep -f AetherSDR-v0.8.6 > /dev/null; then
-    wmctrl -x -a AetherSDR-v0.8.6-x86_64.AppImage.AetherSDR 2>/dev/null
+# ─── AetherSDR ───────────────────────────────────────────────────────────────
+if echo "$CHOICES" | grep -q "AetherSDR"; then
+  if pgrep -f AetherSDR.AppImage > /dev/null; then
+    wmctrl -a AetherSDR 2>/dev/null
   else
-    nohup env XDG_CONFIG_HOME="$HOME/.config/AetherSDR-new-0820" \
-    "$AETHER_0820" >/dev/null 2>&1 &
+    nohup "$AETHER" >/dev/null 2>&1 &
   fi
 fi
 
@@ -122,8 +134,8 @@ fi
 
 # ─── Startup (CQRLOG & QRZ Uploader) ─────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Startup (CQRLOG & QRZ Uploader)"; then
-  if pgrep -f launch-hamradio.sh > /dev/null; then
-    wmctrl -a CQRLOG 2>/dev/null
+  if pgrep -x cqrlog > /dev/null; then
+    wmctrl -a "CQRLOG" 2>/dev/null
   else
     "$HOME/hamradio-linux/launch-hamradio.sh" &
   fi
@@ -131,14 +143,10 @@ fi
 
 # ─── Start Pi Web Control ────────────────────────────────────────────────────
 if echo "$CHOICES" | grep -q "Start Pi Web Control"; then
-  if ssh -i ~/.ssh/ham_radio pi@${PI_IP} "pgrep -f app.py > /dev/null"; then
-    zenity --info --text="ℹ️ Pi Web Control is already running." --timeout=2 2>/dev/null &
-  else
-    ssh -i ~/.ssh/ham_radio pi@${PI_IP} \
-      "nohup python3 ~/ham-web-control/app.py > /tmp/app.log 2>&1 &"
-    sleep 1
-    zenity --info --text="✅ Pi Web Control started on port 5000." --timeout=2 2>/dev/null &
-  fi
+  ssh -i ~/.ssh/ham_radio -o ConnectTimeout=5 -o BatchMode=yes pi@${PI_IP} \
+    "sudo systemctl start ham-web-control" \
+    >/dev/null 2>&1 &
+  zenity --info --text="✅ Pi Web Control starting..." --timeout=2 2>/dev/null &
 fi
 
 # ─── Web Amp/Rotor Control ───────────────────────────────────────────────────
@@ -154,17 +162,7 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
     --ok-label="Yes, Shut Down" \
     --cancel-label="Cancel" 2>/dev/null || exit 0
 
-  # Hand USB control back to Windows before killing anything
-  hand_to_windows
-  sleep 1
-
-  # Close Ham Radio Remote Control browser tab before killing app.py (title changes on disconnect)
-  close_pi_web
-
-  # Stop app.py on Pi
-  ssh -i ~/.ssh/ham_radio pi@${PI_IP} "pkill -f app.py" 2>/dev/null
-
-  # Kill all ham radio processes
+  # Kill all local ham radio processes first
   pkill -f AetherSDR        2>/dev/null
   pkill -f flexspots.py     2>/dev/null
   pkill -f flex-to-log4om   2>/dev/null
@@ -172,8 +170,15 @@ if echo "$CHOICES" | grep -q "Shut Down All"; then
   pkill -x cqrlog           2>/dev/null
   pkill -f launch-hamradio  2>/dev/null
 
-  # Stop SSH tunnel last
-  sleep 1
+  # Close Pi web browser tab
+  close_pi_web
+
+  # Hand USB control back to Windows (3s timeout)
+  curl -s --max-time 3 -X POST "${PI_WEB}/windows" >/dev/null 2>&1 || true
+
+  # Stop app.py on Pi via systemd
+  ssh -i ~/.ssh/ham_radio -o ConnectTimeout=5 pi@${PI_IP} "sudo systemctl stop ham-web-control" 2>/dev/null || true
+
   stop_tunnel
 
   zenity --info --text="✅ All processes stopped.\nControl handed back to Windows." --timeout=3 2>/dev/null &

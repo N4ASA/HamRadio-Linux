@@ -545,6 +545,12 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(
             f"Last upload: {qso.get('callsign','')} at {datetime.now().strftime('%H:%M:%S')}"
         )
+        self.tray.showMessage(
+            "QRZ Upload",
+            f"{qso.get('callsign','')}  {qso.get('band','')} {qso.get('mode','')}",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000
+        )
         qso_id = int(qso.get("id_cqrlog_main", 0))
         if qso_id > self.config.get("last_uploaded_id", 0):
             self.config.set("last_uploaded_id", qso_id)
@@ -637,7 +643,7 @@ def main():
     app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
     window = MainWindow()
-    window.show()
+    window.hide()  # start hidden in system tray
     sys.exit(app.exec())
 
 

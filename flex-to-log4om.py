@@ -18,7 +18,7 @@ def load_config():
             break
     return config
 config=load_config()
-FLEX_HOST="127.0.0.1";FLEX_PORT=4992;RIGCTLD_PORT=4532;ROTOR_UDP_PORT=12345
+FLEX_HOST=config.get("FLEX_IP","192.168.1.29");FLEX_PORT=4992;RIGCTLD_PORT=4532;ROTOR_UDP_PORT=12345
 MY_CALLSIGN=config.get("MY_CALLSIGN","N4ASA")
 MY_GRID=config.get("MY_GRID","FN43")
 MY_LAT=float(config.get("MY_LAT","44.0"))
@@ -529,6 +529,29 @@ def monitor_flex():
             with _flex_sock_lock: _flex_sock=s
             print("Monitoring frequency + spots...")
             buf=""
+            # Drain initial subscription burst and populate spot_db/current_freq without triggering dialogs
+            s.settimeout(0.3)
+            while True:
+                try:
+                    chunk=s.recv(65536).decode(errors='ignore')
+                    if not chunk: break
+                    for line in chunk.split('\n'):
+                        line=line.strip()
+                        if '|spot ' in line and 'callsign=' in line and 'removed' not in line:
+                            cs=re.search(r'callsign=(\S+)',line);rf=re.search(r'rx_freq=(\d+\.\d+)',line);mm=re.search(r'mode=(\w+)',line)
+                            if cs and rf:
+                                with spot_lock: spot_db[float(rf.group(1))]={'callsign':cs.group(1),'mode':mm.group(1) if mm else 'USB'}
+                                print(f"  Init spot: {cs.group(1)} @ {float(rf.group(1)):.3f} MHz")
+                        elif 'slice' in line and 'RF_frequency' in line:
+                            fm=re.search(r'RF_frequency=(\d+\.\d+)',line);mm=re.search(r'mode=(\w+)',line)
+                            if fm:
+                                with freq_lock:
+                                    current_freq=round(float(fm.group(1))*1e6/100)*100
+                                    current_mode=mm.group(1) if mm else 'USB'
+                except socket.timeout: break
+                except Exception: break
+            s.settimeout(3)
+            print(f"  Init complete: {len(spot_db)} spots, freq={current_freq/1e6:.3f} MHz")
             while True:
                 try:
                     chunk=s.recv(4096).decode(errors='ignore');buf+=chunk
